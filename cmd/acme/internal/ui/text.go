@@ -101,45 +101,45 @@ func Texttype(t *wind.Text, r rune) {
 		q0 = wind.Textbacknl(t, t.Org, n)
 		wind.Textsetorigin(t, q0, true)
 		return
-	case draw.KeyHome:
-		wind.Typecommit(t)
-		if t.Org > t.IQ1 {
-			q0 = wind.Textbacknl(t, t.IQ1, 1)
-			wind.Textsetorigin(t, q0, true)
-		} else {
-			wind.Textshow(t, 0, 0, false)
-		}
-		return
-	case draw.KeyEnd:
-		wind.Typecommit(t)
-		if t.IQ1 > t.Org+t.Fr.NumChars {
-			if t.IQ1 > t.Len() {
-				// should not happen, but does. and it will crash textbacknl.
-				t.IQ1 = t.Len()
-			}
-			q0 = wind.Textbacknl(t, t.IQ1, 1)
-			wind.Textsetorigin(t, q0, true)
-		} else {
-			wind.Textshow(t, t.Len(), t.Len(), false)
-		}
-		return
-	case 0x01: // ^A: beginning of line
-		wind.Typecommit(t)
-		// go to where ^U would erase, if not already at BOL
-		nnb = 0
-		if t.Q0 > 0 && t.RuneAt(t.Q0-1) != '\n' {
-			nnb = wind.Textbswidth(t, 0x15)
-		}
-		wind.Textshow(t, t.Q0-nnb, t.Q0-nnb, true)
-		return
-	case 0x05: // ^E: end of line
-		wind.Typecommit(t)
-		q0 = t.Q0
-		for q0 < t.Len() && t.RuneAt(q0) != '\n' {
-			q0++
-		}
-		wind.Textshow(t, q0, q0, true)
-		return
+		//	case draw.KeyHome:
+		//		wind.Typecommit(t)
+		//		if t.Org > t.IQ1 {
+		//			q0 = wind.Textbacknl(t, t.IQ1, 1)
+		//			wind.Textsetorigin(t, q0, true)
+		//		} else {
+		//			wind.Textshow(t, 0, 0, false)
+		//		}
+		//		return
+		//	case draw.KeyEnd:
+		//		wind.Typecommit(t)
+		//		if t.IQ1 > t.Org+t.Fr.NumChars {
+		//			if t.IQ1 > t.Len() {
+		//				// should not happen, but does. and it will crash textbacknl.
+		//				t.IQ1 = t.Len()
+		//			}
+		//			q0 = wind.Textbacknl(t, t.IQ1, 1)
+		//			wind.Textsetorigin(t, q0, true)
+		//		} else {
+		//			wind.Textshow(t, t.Len(), t.Len(), false)
+		//		}
+		//		return
+		//	case 0x01: // ^A: beginning of line
+		//		wind.Typecommit(t)
+		//		// go to where ^U would erase, if not already at BOL
+		//		nnb = 0
+		//		if t.Q0 > 0 && t.RuneAt(t.Q0-1) != '\n' {
+		//			nnb = wind.Textbswidth(t, 0x15)
+		//		}
+		//		wind.Textshow(t, t.Q0-nnb, t.Q0-nnb, true)
+		//		return
+		//	case 0x05: // ^E: end of line
+		//		wind.Typecommit(t)
+		//		q0 = t.Q0
+		//		for q0 < t.Len() && t.RuneAt(q0) != '\n' {
+		//			q0++
+		//		}
+		//		wind.Textshow(t, q0, q0, true)
+		//		return
 	case draw.KeyCmd + 'c': // %C: copy
 		wind.Typecommit(t)
 		XCut(t, t, nil, true, false, nil)
