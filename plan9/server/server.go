@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"sync"
 
 	"9fans.net/go/plan9"
@@ -19,6 +18,7 @@ type fid[F Fid] struct {
 	open     bool
 	attached bool
 	opened   bool
+	inUseBy  string
 
 	// The following fields apply only when the fid is open.
 
@@ -58,6 +58,7 @@ func (f *fid[F]) done() {
 		panic("fid.done called on fid that's not in use")
 	}
 	f.inUse = false
+	f.inUseBy = ""
 }
 
 type server[F Fid] struct {
@@ -119,7 +120,7 @@ func Serve[F Fid](ctx context.Context, conn io.ReadWriter, fs Fsys[F]) error {
 func (srv *server[F]) handleAttach(ctx context.Context, m *plan9.Fcall) error {
 	var afidp *F
 	if m.Afid != plan9.NOFID {
-		afid, err := srv.getFid(m.Afid, fNotOpen)
+		afid, err := srv.getFid(m.Afid, fNotOpen, "attach")
 		if err != nil {
 			return err
 		}
@@ -161,7 +162,7 @@ func (srv *server[F]) handleAttach(ctx context.Context, m *plan9.Fcall) error {
 }
 
 func (srv *server[F]) handleStat(ctx context.Context, m *plan9.Fcall) error {
-	fid, err := srv.getFid(m.Afid, fNotOpen)
+	fid, err := srv.getFid(m.Afid, fNotOpen, "stat")
 	if err != nil {
 		return err
 	}
@@ -187,7 +188,7 @@ func (srv *server[F]) handleStat(ctx context.Context, m *plan9.Fcall) error {
 }
 
 func (srv *server[F]) handleWalk(ctx context.Context, m *plan9.Fcall) error {
-	fid, err := srv.getFid(m.Fid, fExcl)
+	fid, err := srv.getFid(m.Fid, fExcl, "walk")
 	if err != nil {
 		return err
 	}
@@ -200,9 +201,8 @@ func (srv *server[F]) handleWalk(ctx context.Context, m *plan9.Fcall) error {
 		}
 	}
 	go func() {
-		defer fid.done()
 		qids, err := srv.walk(ctx, fid, newFid, m.Wname)
-		log.Printf("wname %q; got qids %v; err %v", m.Wname, qids, err)
+		fid.done()
 		if len(qids) < len(m.Wname) {
 			srv.delFid(newFid)
 			if len(qids) == 0 {
@@ -247,7 +247,7 @@ func (srv *server[F]) walk(ctx context.Context, fid, newFid *fid[F], names []str
 }
 
 func (srv *server[F]) handleOpen(ctx context.Context, m *plan9.Fcall) error {
-	fid, err := srv.getFid(m.Fid, fExcl)
+	fid, err := srv.getFid(m.Fid, fExcl, "open")
 	if err != nil {
 		return err
 	}
@@ -259,12 +259,12 @@ func (srv *server[F]) handleOpen(ctx context.Context, m *plan9.Fcall) error {
 	}
 	// TODO handle OEXCL ?
 	go func() {
-		defer fid.done()
 		// TODO we could potentially help out by invoking src.fs.Stat
 		// and checking permissions, but that does have the potential
 		// to be racy.
 		f, iounit, err := srv.fs.Open(ctx, fid.fid, m.Mode)
 		if err != nil {
+			fid.done()
 			srv.sendError(m.Tag, err)
 			return
 		}
@@ -278,6 +278,7 @@ func (srv *server[F]) handleOpen(ctx context.Context, m *plan9.Fcall) error {
 		fid.open = true
 		fid.openMode = m.Mode
 		fid.iounit = iounit
+		fid.done()
 		srv.sendMessage(&plan9.Fcall{
 			Type:   plan9.Ropen,
 			Tag:    m.Tag,
@@ -289,7 +290,7 @@ func (srv *server[F]) handleOpen(ctx context.Context, m *plan9.Fcall) error {
 }
 
 func (srv *server[F]) handleRead(ctx context.Context, m *plan9.Fcall) error {
-	fid, err := srv.getFid(m.Fid, fOpen)
+	fid, err := srv.getFid(m.Fid, fOpen, "read")
 	if err != nil {
 		return err
 	}
@@ -298,7 +299,7 @@ func (srv *server[F]) handleRead(ctx context.Context, m *plan9.Fcall) error {
 	}
 	isDir := fid.fid.Qid().IsDir()
 	if isDir {
-		fid, err = srv.getFid(m.Fid, fOpen|fExcl)
+		fid, err = srv.getFid(m.Fid, fOpen|fExcl, "readdir")
 		if err != nil {
 			return err
 		}
@@ -310,8 +311,9 @@ func (srv *server[F]) handleRead(ctx context.Context, m *plan9.Fcall) error {
 
 	go func() {
 		if isDir {
-			defer fid.done()
-			if err := srv.readDir(ctx, m.Tag, fid, offset, m.Count); err != nil {
+			err := srv.readDir(ctx, m.Tag, fid, offset, m.Count)
+			fid.done()
+			if err != nil {
 				srv.sendError(m.Tag, err)
 			}
 			return
@@ -389,7 +391,7 @@ func (srv *server[F]) handleClunk(ctx context.Context, m *plan9.Fcall) error {
 	// TODO wait for operations on the fid to complete (or just return an
 	// error if there are other operations in progress and be damned with
 	// the spec?)
-	fid, err := srv.getFid(m.Fid, 0)
+	fid, err := srv.getFid(m.Fid, 0, "clunk")
 	if err != nil {
 		return err
 	}
@@ -433,9 +435,12 @@ func (srv *server[F]) newFid(id uint32) (*fid[F], error) {
 	defer srv.mu.Unlock()
 	f, ok := srv.fids[id]
 	if ok {
+		panic(fmt.Errorf("fid %d already in use", id))
 		return nil, fmt.Errorf("fid %d already in use", id)
 	}
-	f = &fid[F]{}
+	f = &fid[F]{
+		id: id,
+	}
 	srv.fids[id] = f
 	return f, nil
 }
@@ -448,7 +453,7 @@ const (
 	fNotOpen
 )
 
-func (srv *server[F]) getFid(id uint32, mode fidMode) (*fid[F], error) {
+func (srv *server[F]) getFid(id uint32, mode fidMode, op string) (*fid[F], error) {
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
 
@@ -461,7 +466,7 @@ func (srv *server[F]) getFid(id uint32, mode fidMode) (*fid[F], error) {
 	// Check early on so that when the fid is acquired exclusively,
 	// some fields can be modified without acquiring the mutex.
 	if (mode&fExcl) != 0 && f.inUse {
-		return nil, fmt.Errorf("fid is already in use")
+		return nil, fmt.Errorf("fid is already in use by %s", f.inUseBy)
 	}
 	if !f.attached {
 		return nil, fmt.Errorf("fid %d is not usable yet (concurrent calls to create a new fid?)", id)
@@ -474,6 +479,7 @@ func (srv *server[F]) getFid(id uint32, mode fidMode) (*fid[F], error) {
 	}
 	if (mode & fExcl) != 0 {
 		f.inUse = true
+		f.inUseBy = op
 	}
 	// TODO take a reference on the fid to indicate that an
 	// operation is using it, so that Clunk can wait for the

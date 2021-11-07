@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	stdpath "path"
+	"sort"
 	"strings"
 
 	"9fans.net/go/plan9"
@@ -17,28 +18,33 @@ type staticFsys struct {
 }
 
 type StaticFile struct {
-	Name    string
-	Exec    bool
-	Content []byte
-	Entries []StaticFile
+	// Entries holds the set of entries in a directory.
+	// If it's nil, the StaticFile represents a regular
+	// file and Content holds its contents.
+	Entries    map[string]StaticFile
+	Content    []byte
+	Executable bool
 }
 
 type staticFileQ struct {
-	qid     plan9.Qid
-	name    string
-	perm    uint
-	content []byte
-	entries []*staticFileQ
+	qid        plan9.Qid
+	name       string
+	perm       uint
+	executable bool
+	content    []byte
+	entries    []*staticFileQ
 }
 
 type StaticFsys = Fsys[*staticFileQ]
 
-func NewStaticFsys(entries []StaticFile) (StaticFsys, error) {
-	root := &StaticFile{
-		Name:    ".",
+// NewStaticFsys returns an instance of StaticFsys that serves
+// static read-only content. The given entries hold the contents of the root
+// directory.
+func NewStaticFsys(entries map[string]StaticFile) (StaticFsys, error) {
+	root := StaticFile{
 		Entries: entries,
 	}
-	rootq, _, err := calcQids(root, "", 1)
+	rootq, _, err := calcQids(".", root, "", 1)
 	if err != nil {
 		return nil, fmt.Errorf("bad file tree: %v", err)
 	}
@@ -64,21 +70,24 @@ func (fs *staticFsys) Stat(ctx context.Context, f *staticFileQ) (plan9.Dir, erro
 }
 
 func (fs *staticFsys) makeDir(f *staticFileQ) plan9.Dir {
-	return plan9.Dir{
-		Qid:  f.qid,
-		Name: f.name,
+	m := plan9.Perm(0o444)
+	if f.executable {
+		m |= 0o111
 	}
-	//	Type   uint16
-	//	Dev    uint32
-	//	Qid    Qid
-	//	Mode   Perm
-	//	Atime  uint32
-	//	Mtime  uint32
-	//	Length uint64
-	//	Name   string
-	//	Uid    string
-	//	Gid    string
-	//	Muid   string
+	length := uint64(0)
+	if f.entries != nil {
+		m |= plan9.DMDIR
+	} else {
+		length = uint64(len(f.content))
+	}
+	return plan9.Dir{
+		Qid:    f.qid,
+		Name:   f.name,
+		Mode:   m,
+		Length: length,
+		Uid:    "noone",
+		Gid:    "noone",
+	}
 }
 
 func (fs *staticFsys) Walk(ctx context.Context, f *staticFileQ, name string) (*staticFileQ, error) {
@@ -116,17 +125,13 @@ func validName(s string) bool {
 	return !strings.ContainsAny(s, "/")
 }
 
-func calcQids(f *StaticFile, path string, qpath uint64) (_ *staticFileQ, maxQpath uint64, err error) {
-	if !validName(f.Name) {
-		return nil, 0, fmt.Errorf("file name %q in directory %q isn't valid", f.Name, path)
+func calcQids(fname string, f StaticFile, path string, qpath uint64) (_ *staticFileQ, maxQpath uint64, err error) {
+	if !validName(fname) {
+		return nil, 0, fmt.Errorf("file name %q in directory %q isn't valid", fname, path)
 	}
-	path = stdpath.Join(path, f.Name)
+	path = stdpath.Join(path, fname)
 	if f.Content != nil && f.Entries != nil {
 		return nil, 0, fmt.Errorf("%q has both content and entries set", path)
-	}
-	if f.Content == nil && f.Entries == nil {
-		// Default to an empty file unless we're at the root (qpath == 0)
-		panic("no content, no entries")
 	}
 	qtype := uint8(0)
 	if f.Entries != nil {
@@ -137,13 +142,24 @@ func calcQids(f *StaticFile, path string, qpath uint64) (_ *staticFileQ, maxQpat
 			Path: qpath,
 			Type: qtype,
 		},
-		name:    f.Name,
-		content: f.Content,
-		entries: make([]*staticFileQ, len(f.Entries)),
+		name:       fname,
+		executable: f.Executable,
+		content:    f.Content,
 	}
 	qpath++
-	for i := range qf.entries {
-		e, qp, err := calcQids(&f.Entries[i], path, qpath)
+	if f.Entries == nil {
+		return qf, qpath, nil
+	}
+	// sort by name for predictability of tests.
+	names := make([]string, 0, len(f.Entries))
+	for name := range f.Entries {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	qf.entries = make([]*staticFileQ, len(names))
+	for i, name := range names {
+		entry := f.Entries[name]
+		e, qp, err := calcQids(name, entry, path, qpath)
 		if err != nil {
 			return nil, 0, err
 		}
