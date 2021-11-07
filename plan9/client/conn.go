@@ -218,6 +218,7 @@ func (c *conn) write(f *plan9.Fcall) error {
 	if err := c.getErr(); err != nil {
 		return err
 	}
+	fmt.Println("-> ", f)
 	err := plan9.WriteFcall(c.rwc, f)
 	if err != nil {
 		c.setErr(err)
@@ -267,6 +268,7 @@ func (c *conn) rpc(tx *plan9.Fcall, clunkFid *Fid) (rx *plan9.Fcall, err error) 
 		if err != nil {
 			break
 		}
+		fmt.Println("<-", rx)
 		c.mux(rx)
 	}
 
