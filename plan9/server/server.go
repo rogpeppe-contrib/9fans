@@ -6,30 +6,36 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"9fans.net/go/plan9"
 )
 
 type fid[F Fid] struct {
-	id       uint32
-	mu       sync.Mutex
-	fid      F
-	inUse    bool
-	open     bool
-	attached bool
-	opened   bool
-	inUseBy  string
+	id uint32
 
-	// The following fields apply only when the fid is open.
+	// 1 for the fid table + 1 for every operation currently running on it.
+	// The fid is clunked when it drops to zero.
+	refCount int32
+
+	// mu guards the rest of the fields in the fid.
+	mu rwMutex
+
+	// fid holds the associated Fsys data.
+	fid F
+
+	// open holds whether the fid has been opened.
+	open bool
 
 	// openMode holds the mode that the fid was opened in.
-	// It's not mutated after the fid is open, so it can be accessed
-	// without obtaining fid.mu.
 	openMode uint8
 
-	// iounit holds the iounit of the file. Like openMode, it's not mutated
-	// after the fid is open.
+	// iounit holds the iounit of the file.
 	iounit uint32
+
+	// dirMu guards concurrent reads on a directory.
+	// TODO make this into a mutex with locks that can be canceled.
+	dirMu sync.Mutex
 
 	// dirOffset holds the next directory byte offset. Guarded by mu.
 	dirOffset int64
@@ -44,28 +50,22 @@ type fid[F Fid] struct {
 	dirEntryBuf []plan9.Dir
 }
 
-func (f *fid[F]) attach(fsf F) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.attached = true
-	f.fid = fsf
-}
-
-func (f *fid[F]) done() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if !f.inUse {
-		panic("fid.done called on fid that's not in use")
-	}
-	f.inUse = false
-	f.inUseBy = ""
+type xtag[F Fid] struct {
+	m *plan9.Fcall
+	// fid holds the existing fid associated with the operation, if any.
+	fid *fid[F]
+	// excl holds whether the above fid has been exclusively locked.
+	excl bool
+	// newFid holds the new fid being created by the operation, if any.
+	newFid *fid[F]
 }
 
 type server[F Fid] struct {
-	fs   Fsys[F]
-	conn io.ReadWriter
-	mu   sync.Mutex
-	fids map[uint32]*fid[F]
+	fs         Fsys[F]
+	conn       io.ReadWriter
+	mu         sync.Mutex
+	fids       map[uint32]*fid[F]
+	operations map[uint8]func(srv *server[F], ctx context.Context, t *xtag[F], m *plan9.Fcall) error
 }
 
 func Serve[F Fid](ctx context.Context, conn io.ReadWriter, fs Fsys[F]) error {
@@ -73,6 +73,15 @@ func Serve[F Fid](ctx context.Context, conn io.ReadWriter, fs Fsys[F]) error {
 		conn: conn,
 		fs:   fs,
 		fids: make(map[uint32]*fid[F]),
+		operations: map[uint8]func(srv *server[F], ctx context.Context, t *xtag[F], m *plan9.Fcall) error{
+			//plan9.Tauth: (*server[F]).handleAuth,
+			plan9.Tattach: (*server[F]).handleAttach,
+			plan9.Tstat:   (*server[F]).handleStat,
+			plan9.Twalk:   (*server[F]).handleWalk,
+			plan9.Tread:   (*server[F]).handleRead,
+			plan9.Topen:   (*server[F]).handleOpen,
+			plan9.Tclunk:  (*server[F]).handleClunk,
+		},
 	}
 	defer fs.Close()
 	m, err := plan9.ReadFcall(conn)
@@ -104,115 +113,81 @@ func Serve[F Fid](ctx context.Context, conn io.ReadWriter, fs Fsys[F]) error {
 			}
 			return err
 		}
-		op := operations[m.Type]
-		if op == nil {
-			srv.sendError(m.Tag, fmt.Errorf("bad operation type"))
+		t := srv.newTag(ctx, m)
+		if t == nil {
 			continue
 		}
-		if err := op(srv, ctx, m); err != nil {
-			srv.sendError(m.Tag, err)
+		op := srv.operations[m.Type]
+		if op == nil {
+			srv.replyError(t, fmt.Errorf("bad operation type"))
+			continue
+		}
+		if err := op(srv, ctx, t, m); err != nil {
+			srv.replyError(t, err)
 		}
 	}
 }
 
 // TODO	Auth(ctx context.Context, uname, aname string) (F, error)
 
-func (srv *server[F]) handleAttach(ctx context.Context, m *plan9.Fcall) error {
-	var afidp *F
-	if m.Afid != plan9.NOFID {
-		afid, err := srv.getFid(m.Afid, fNotOpen, "attach")
-		if err != nil {
-			return err
-		}
-		// TODO we should be able to cope with a client that
-		// sends a clunk for a fid while an operation on that fid
-		// is still in progress. What should we do in that case?
-		// Delay the clunk until the operation(s) have completed?
-		// In that case, we'll need to be able to wait for operations
-		// on any given fid to complete.
-		f := afid.fid
-		afidp = &f
-	}
-	fid, err := srv.newFid(m.Fid)
-	if err != nil {
-		return err
-	}
+func (srv *server[F]) handleAttach(ctx context.Context, t *xtag[F], m *plan9.Fcall) error {
 	//ctx = srv.newContext(ctx, m.Tag) TODO when flush is implemented
 	go func() {
+		var afidp *F
+		if t.newFid != nil {
+			afidp = ref(t.newFid.fid)
+		}
 		f, err := srv.fs.Attach(ctx, afidp, m.Uname, m.Aname)
 		if err != nil {
-			srv.delFid(fid)
-			srv.sendError(m.Tag, err)
+			srv.replyError(t, err)
 			return
 		}
 		if !f.Qid().IsDir() {
-			srv.delFid(fid)
-			srv.sendError(m.Tag, fmt.Errorf("root is not a directory"))
+			srv.replyError(t, fmt.Errorf("root is not a directory"))
 			return
 		}
-		// TODO sanity check that f.Qid returns a directory?
-		fid.attach(f)
-		srv.sendMessage(&plan9.Fcall{
+		t.newFid.fid = f
+		srv.reply(t, &plan9.Fcall{
 			Type: plan9.Rattach,
-			Tag:  m.Tag,
 			Qid:  f.Qid(),
 		})
 	}()
 	return nil
 }
 
-func (srv *server[F]) handleStat(ctx context.Context, m *plan9.Fcall) error {
-	fid, err := srv.getFid(m.Afid, fNotOpen, "stat")
-	if err != nil {
-		return err
-	}
+func (srv *server[F]) handleStat(ctx context.Context, t *xtag[F], m *plan9.Fcall) error {
 	go func() {
-		dir, err := srv.fs.Stat(ctx, fid.fid)
+		dir, err := srv.fs.Stat(ctx, t.fid.fid)
 		if err != nil {
-			srv.sendError(m.Tag, err)
+			srv.replyError(t, err)
 			return
 		}
-		dir.Qid = fid.fid.Qid()
+		dir.Qid = t.fid.fid.Qid()
 		stat, err := dir.Bytes()
 		if err != nil {
-			srv.sendError(m.Tag, fmt.Errorf("cannot marshal Dir: %v", err))
+			srv.replyError(t, fmt.Errorf("cannot marshal Dir: %v", err))
 			return
 		}
-		srv.sendMessage(&plan9.Fcall{
+		srv.reply(t, &plan9.Fcall{
 			Type: plan9.Rstat,
-			Tag:  m.Tag,
 			Stat: stat,
 		})
 	}()
 	return nil
 }
 
-func (srv *server[F]) handleWalk(ctx context.Context, m *plan9.Fcall) error {
-	fid, err := srv.getFid(m.Fid, fExcl, "walk")
-	if err != nil {
-		return err
-	}
-	newFid := fid
-	if m.Newfid != m.Fid {
-		newFid, err = srv.newFid(m.Newfid)
-		if err != nil {
-			fid.done()
-			return err
-		}
+func (srv *server[F]) handleWalk(ctx context.Context, t *xtag[F], m *plan9.Fcall) error {
+	if t.fid.open {
+		return fmt.Errorf("cannot walk open fid")
 	}
 	go func() {
-		qids, err := srv.walk(ctx, fid, newFid, m.Wname)
-		fid.done()
-		if len(qids) < len(m.Wname) {
-			srv.delFid(newFid)
-			if len(qids) == 0 {
-				srv.sendError(m.Tag, err)
-				return
-			}
+		qids, err := srv.walk(ctx, t.fid, t.newFid, m.Wname)
+		if len(qids) < len(m.Wname) && len(qids) == 0 {
+			srv.replyError(t, err)
+			return
 		}
-		srv.sendMessage(&plan9.Fcall{
+		srv.reply(t, &plan9.Fcall{
 			Type: plan9.Rwalk,
-			Tag:  m.Tag,
 			Wqid: qids,
 		})
 	}()
@@ -220,14 +195,13 @@ func (srv *server[F]) handleWalk(ctx context.Context, m *plan9.Fcall) error {
 }
 
 func (srv *server[F]) walk(ctx context.Context, fid, newFid *fid[F], names []string) (rqids []plan9.Qid, rerr error) {
-	newf, err := srv.fs.Clone(ctx, fid.fid)
-	if err != nil {
-		return nil, err
+	if newFid == nil {
+		newFid = fid
 	}
+	newf := srv.fs.Clone(fid.fid)
 	defer func() {
 		if len(rqids) < len(names) {
-			// TODO what should we do if this fails?
-			srv.fs.Clunk(ctx, newf)
+			srv.fs.Clunk(newf)
 		}
 	}()
 	qids := make([]plan9.Qid, 0, len(names))
@@ -237,24 +211,22 @@ func (srv *server[F]) walk(ctx context.Context, fid, newFid *fid[F], names []str
 			return qids, err
 		}
 		if newf1 != newf {
-			srv.fs.Clunk(ctx, newf)
+			srv.fs.Clunk(newf)
 			newf = newf1
 		}
 		qids = append(qids, newf.Qid())
 	}
-	newFid.attach(newf)
+	newFid.fid = newf
 	return qids, nil
 }
 
-func (srv *server[F]) handleOpen(ctx context.Context, m *plan9.Fcall) error {
-	fid, err := srv.getFid(m.Fid, fExcl, "open")
-	if err != nil {
-		return err
+func (srv *server[F]) handleOpen(ctx context.Context, t *xtag[F], m *plan9.Fcall) error {
+	if t.fid.open {
+		return fmt.Errorf("fid is already open")
 	}
-	if fid.fid.Qid().IsDir() && (m.Mode == plan9.OWRITE ||
+	if t.fid.fid.Qid().IsDir() && (m.Mode == plan9.OWRITE ||
 		m.Mode == plan9.ORDWR ||
 		m.Mode == plan9.OEXEC) {
-		fid.done()
 		return errPerm
 	}
 	// TODO handle OEXCL ?
@@ -262,26 +234,23 @@ func (srv *server[F]) handleOpen(ctx context.Context, m *plan9.Fcall) error {
 		// TODO we could potentially help out by invoking src.fs.Stat
 		// and checking permissions, but that does have the potential
 		// to be racy.
-		f, iounit, err := srv.fs.Open(ctx, fid.fid, m.Mode)
+		f, iounit, err := srv.fs.Open(ctx, t.fid.fid, m.Mode)
 		if err != nil {
-			fid.done()
-			srv.sendError(m.Tag, err)
+			srv.replyError(t, err)
 			return
 		}
 		if iounit == 0 {
 			iounit = 8 * 1024
 		}
-		if fid.fid != f {
-			srv.fs.Clunk(ctx, fid.fid)
+		if t.fid.fid != f {
+			srv.fs.Clunk(t.fid.fid)
 		}
-		fid.fid = f
-		fid.open = true
-		fid.openMode = m.Mode
-		fid.iounit = iounit
-		fid.done()
-		srv.sendMessage(&plan9.Fcall{
+		t.fid.fid = f
+		t.fid.open = true
+		t.fid.openMode = m.Mode
+		t.fid.iounit = iounit
+		srv.reply(t, &plan9.Fcall{
 			Type:   plan9.Ropen,
-			Tag:    m.Tag,
 			Qid:    f.Qid(),
 			Iounit: iounit,
 		})
@@ -289,52 +258,49 @@ func (srv *server[F]) handleOpen(ctx context.Context, m *plan9.Fcall) error {
 	return nil
 }
 
-func (srv *server[F]) handleRead(ctx context.Context, m *plan9.Fcall) error {
-	fid, err := srv.getFid(m.Fid, fOpen, "read")
-	if err != nil {
-		return err
+func (srv *server[F]) handleRead(ctx context.Context, t *xtag[F], m *plan9.Fcall) error {
+	if !t.fid.open {
+		return fmt.Errorf("fid not open")
 	}
-	if !canRead(fid.openMode) {
+	if !canRead(t.fid.openMode) {
 		return errPerm
-	}
-	isDir := fid.fid.Qid().IsDir()
-	if isDir {
-		fid, err = srv.getFid(m.Fid, fOpen|fExcl, "readdir")
-		if err != nil {
-			return err
-		}
 	}
 	offset := int64(m.Offset)
 	if offset < 0 {
 		return fmt.Errorf("offset too big")
 	}
-
 	go func() {
-		if isDir {
-			err := srv.readDir(ctx, m.Tag, fid, offset, m.Count)
-			fid.done()
+		if t.fid.fid.Qid().IsDir() {
+			err := srv.readDir(ctx, t, offset, m.Count)
 			if err != nil {
-				srv.sendError(m.Tag, err)
+				srv.replyError(t, err)
 			}
 			return
 		}
-		buf := make([]byte, min(fid.iounit, m.Count))
-		n, err := srv.fs.ReadAt(ctx, fid.fid, buf, offset)
+		buf := make([]byte, min(t.fid.iounit, m.Count))
+		n, err := srv.fs.ReadAt(ctx, t.fid.fid, buf, offset)
 		if err != nil {
-			srv.sendError(m.Tag, err)
+			srv.replyError(t, err)
 			return
 		}
-		srv.sendMessage(&plan9.Fcall{
+		srv.reply(t, &plan9.Fcall{
 			Type: plan9.Rread,
-			Tag:  m.Tag,
 			Data: buf[:n],
 		})
 	}()
 	return nil
 }
 
-func (srv *server[F]) readDir(ctx context.Context, tag uint16, f *fid[F], offset int64, count uint32) error {
-	// It's OK to access fields directly here because f is acquired exclusively above.
+func (srv *server[F]) readDir(ctx context.Context, t *xtag[F], offset int64, count uint32) error {
+	f := t.fid
+	// Acquire an exclusive lock so that we can mutate directory reading state without
+	// worrying about concurrent Tread operations.
+	// TODO use context-aware lock
+	//	if !t.fid.dirMu.Lock(ctx) {
+	//		return ctx.Err()
+	//	}
+	t.fid.dirMu.Lock()
+	defer t.fid.dirMu.Unlock()
 	if offset == 0 {
 		f.dirOffset = 0
 		f.dirIndex = 0
@@ -370,49 +336,37 @@ func (srv *server[F]) readDir(ctx context.Context, tag uint16, f *fid[F], offset
 		f.dirEntries = f.dirEntries[1:]
 		f.dirIndex++
 	}
-	srv.sendMessage(&plan9.Fcall{
+	srv.reply(t, &plan9.Fcall{
 		Type: plan9.Rread,
-		Tag:  tag,
 		Data: buf,
 	})
 	f.dirOffset += int64(len(buf))
 	return nil
 }
 
-func canRead(mode uint8) bool {
-	switch mode &^ 3 {
-	case plan9.OREAD, plan9.ORDWR, plan9.OEXEC:
-		return true
-	}
-	return false
-}
-
-func (srv *server[F]) handleClunk(ctx context.Context, m *plan9.Fcall) error {
-	// TODO wait for operations on the fid to complete (or just return an
-	// error if there are other operations in progress and be damned with
-	// the spec?)
-	fid, err := srv.getFid(m.Fid, 0, "clunk")
-	if err != nil {
-		return err
-	}
-	srv.delFid(fid) // or should this be done after calling Clunk?
+func (srv *server[F]) handleClunk(ctx context.Context, t *xtag[F], m *plan9.Fcall) error {
 	go func() {
-		srv.fs.Clunk(ctx, fid.fid)
-		srv.sendMessage(&plan9.Fcall{
+		srv.delFid(t.fid)
+		srv.reply(t, &plan9.Fcall{
 			Type: plan9.Rclunk,
-			Tag:  m.Tag,
 			Fid:  m.Fid,
 		})
 	}()
 	return nil
 }
 
-func (srv *server[F]) sendError(tag uint16, err error) {
-	srv.sendMessage(&plan9.Fcall{
+func (srv *server[F]) replyError(t *xtag[F], err error) {
+	srv.reply(t, &plan9.Fcall{
 		Type:  plan9.Rerror,
-		Tag:   tag,
 		Ename: err.Error(),
 	})
+}
+
+func (srv *server[F]) reply(t *xtag[F], m *plan9.Fcall) {
+	m.Tag = t.m.Tag
+	fail := m.Tag == plan9.Rerror || m.Tag == plan9.Rwalk && len(m.Wqid) < len(m.Wname)
+	srv.releaseTag(t, !fail)
+	srv.sendMessage(m)
 }
 
 func (srv *server[F]) sendMessage(m *plan9.Fcall) {
@@ -428,6 +382,8 @@ func (srv *server[F]) handleFlush(m *plan9.Fcall) error {
 	// if a request finds a canceled context, it doesn't
 	// send its response.
 
+	// Also, remember that if an operation is flushed and we don't
+	// send its reply, we need to drop its fid reference.
 }
 
 func (srv *server[F]) newFid(id uint32) (*fid[F], error) {
@@ -435,7 +391,6 @@ func (srv *server[F]) newFid(id uint32) (*fid[F], error) {
 	defer srv.mu.Unlock()
 	f, ok := srv.fids[id]
 	if ok {
-		panic(fmt.Errorf("fid %d already in use", id))
 		return nil, fmt.Errorf("fid %d already in use", id)
 	}
 	f = &fid[F]{
@@ -445,75 +400,173 @@ func (srv *server[F]) newFid(id uint32) (*fid[F], error) {
 	return f, nil
 }
 
-type fidMode uint8
-
-const (
-	fExcl fidMode = 1 << iota
-	fOpen
-	fNotOpen
-)
-
-func (srv *server[F]) getFid(id uint32, mode fidMode, op string) (*fid[F], error) {
-	srv.mu.Lock()
-	defer srv.mu.Unlock()
-
-	f := srv.fids[id]
-	if f == nil {
-		return nil, fmt.Errorf("fid %d not found", id)
+func (srv *server[F]) releaseFid(f *fid[F]) {
+	if atomic.AddInt32(&f.refCount, -1) == 0 && !isZero(f.fid) {
+		srv.fs.Clunk(f.fid)
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	// Check early on so that when the fid is acquired exclusively,
-	// some fields can be modified without acquiring the mutex.
-	if (mode&fExcl) != 0 && f.inUse {
-		return nil, fmt.Errorf("fid is already in use by %s", f.inUseBy)
-	}
-	if !f.attached {
-		return nil, fmt.Errorf("fid %d is not usable yet (concurrent calls to create a new fid?)", id)
-	}
-	if (mode&fOpen) != 0 && !f.open {
-		return nil, fmt.Errorf("fid must be opened first")
-	}
-	if (mode&fNotOpen) != 0 && f.open {
-		return nil, fmt.Errorf("operation not allowed on open fid")
-	}
-	if (mode & fExcl) != 0 {
-		f.inUse = true
-		f.inUseBy = op
-	}
-	// TODO take a reference on the fid to indicate that an
-	// operation is using it, so that Clunk can wait for the
-	// operations to complete.
-	return f, nil
 }
 
 func (srv *server[F]) delFid(f *fid[F]) {
 	srv.mu.Lock()
-	defer srv.mu.Unlock()
+	if _, ok := srv.fids[f.id]; !ok {
+		panic("delete of fid that's not in the fid table")
+	}
 	delete(srv.fids, f.id)
+	srv.mu.Unlock()
+	srv.releaseFid(f)
 }
 
-// serverOps holds the server.handle* methods.
-// We need to use an interface rather than use (*server).handle*
-// directly because we can't use *server in a global variable
-// without instantiation.
-type serverOps interface {
-	handleAttach(ctx context.Context, m *plan9.Fcall) error
-	handleStat(ctx context.Context, m *plan9.Fcall) error
-	handleWalk(ctx context.Context, m *plan9.Fcall) error
-	handleOpen(ctx context.Context, m *plan9.Fcall) error
-	handleRead(ctx context.Context, m *plan9.Fcall) error
-	handleClunk(ctx context.Context, m *plan9.Fcall) error
+// newTag returns a new xtag instance for the operation implied by m.
+//
+// It acquires references to any fids in m and locks them appropriately.
+// When the tag is released (with releaseTag), the references will be
+// dropped and the locks unlocked.
+func (srv *server[F]) newTag(ctx context.Context, m *plan9.Fcall) *xtag[F] {
+	// TODO add the tag to srv.tags.
+	t := &xtag[F]{
+		m: m,
+	}
+	if err := srv.initTag(t, m); err != nil {
+		srv.replyError(t, err)
+		return nil
+	}
+	return t
 }
 
-var operations = map[uint8]func(srv serverOps, ctx context.Context, m *plan9.Fcall) error{
-	//plan9.Tauth: serverOps.handleAuth,
-	plan9.Tattach: serverOps.handleAttach,
-	plan9.Tstat:   serverOps.handleStat,
-	plan9.Twalk:   serverOps.handleWalk,
-	plan9.Tread:   serverOps.handleRead,
-	plan9.Topen:   serverOps.handleOpen,
-	plan9.Tclunk:  serverOps.handleClunk,
+func (srv *server[F]) initTag(t *xtag[F], m *plan9.Fcall) error {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	var nfid uint32 = plan9.NOFID
+	switch m.Type {
+	case plan9.Tauth:
+		nfid = m.Afid
+	case plan9.Twalk:
+		if m.Newfid != m.Fid {
+			nfid = m.Newfid
+		}
+	case plan9.Tattach:
+		nfid = m.Fid
+	}
+	if nfid != plan9.NOFID {
+		f, ok := srv.fids[nfid]
+		if ok {
+			return fmt.Errorf("fid %d already in use", nfid)
+		}
+		f = &fid[F]{
+			id: nfid,
+			// One reference for the fid table and one for the xtag.
+			refCount: 2,
+		}
+		f.mu.lock(nil)
+		srv.fids[nfid] = f
+		t.newFid = f
+	}
+	var fid uint32 = plan9.NOFID
+	switch m.Type {
+	case plan9.Tversion,
+		plan9.Tauth,
+		plan9.Tflush:
+		// The above operations don't refer to an existing fid.
+	case plan9.Tattach:
+		fid = m.Afid
+	default:
+		// All other operations refer to an existing fid.
+		if m.Fid == plan9.NOFID {
+			return fmt.Errorf("invalid fid %d", m.Fid)
+		}
+		fid = m.Fid
+	}
+	if fid == plan9.NOFID {
+		// No fid to acquire, so we're all done.
+		return nil
+	}
+	f := srv.fids[fid]
+	if f == nil {
+		return fmt.Errorf("invalid fid %d", fid)
+	}
+	excl := false
+	// Determine whether it's an operation that modifies some of the content of the fid
+	// and so requires an exclusive lock.
+	switch m.Type {
+	case plan9.Topen,
+		plan9.Tremove,
+		plan9.Tcreate,
+		plan9.Tclunk:
+		excl = true
+	case plan9.Twalk:
+		excl = m.Fid == m.Newfid
+	}
+	onFail := func() {}
+	if m.Type == plan9.Tclunk || m.Type == plan9.Tremove {
+		// For clunk and remove, the fid is clunked regardless of whether
+		// the operation failed or not.
+		// When we can't take out an exclusive lock, we don't
+		// want to clunk the fid here, because that would imply
+		// invoking srv.fs.Clunk here, which has potential for deadlock
+		// because we're holding the global lock (and blocking the
+		// main loop), so we delete the fid from the fid table while
+		// the internal rwmutex lock is held, because otherwise there's
+		// a race beteen failing to acquire the mutex and dropping the
+		// refcount.
+		//
+		// Note that we know that there must be a reference to the fid
+		// on failure because newTag always increments the reference count
+		// when it acquires the mutex.
+		//
+		// TODO the onFail thing rather breaks the rwMutex abstraction.
+		// Perhaps we'd be better hoisting the reader count directly up into
+		// the fid type?
+		onFail = func() {
+			atomic.AddInt32(&f.refCount, -1)
+			delete(srv.fids, fid)
+		}
+	}
+	var ok bool
+	if excl {
+		ok = f.mu.lock(onFail)
+	} else {
+		ok = f.mu.rlock(onFail)
+	}
+	if !ok {
+		return fmt.Errorf("fid in use")
+	}
+	t.excl = excl
+	t.fid = f
+	// Add a fid reference for the  tag.
+	atomic.AddInt32(&f.refCount, 1)
+	return nil
+}
+
+func (srv *server[F]) releaseTag(t *xtag[F], success bool) {
+	if t.fid != nil {
+		if t.excl {
+			t.fid.mu.unlock()
+		} else {
+			t.fid.mu.runlock()
+		}
+		srv.releaseFid(t.fid)
+		t.fid = nil
+	}
+	if t.newFid == nil {
+		return
+	}
+	// newFid is always acquired exclusively.
+	t.newFid.mu.unlock()
+	srv.releaseFid(t.newFid)
+	if success {
+		return
+	}
+	// The request was asking to create a new fid, but failed,
+	// so remove it from the table.
+	srv.delFid(t.newFid)
+}
+
+func canRead(mode uint8) bool {
+	switch mode &^ 3 {
+	case plan9.OREAD, plan9.ORDWR, plan9.OEXEC:
+		return true
+	}
+	return false
 }
 
 func min[T constraints.Ordered](a, b T) T {
@@ -521,4 +574,12 @@ func min[T constraints.Ordered](a, b T) T {
 		return a
 	}
 	return b
+}
+
+func isZero[T comparable](x T) bool {
+	return x == *new(T)
+}
+
+func ref[T any](x T) *T {
+	return &x
 }

@@ -57,8 +57,11 @@ func (f *staticFileQ) Qid() plan9.Qid {
 	return f.qid
 }
 
-func (fs *staticFsys) Clone(ctx context.Context, f *staticFileQ) (*staticFileQ, error) {
-	return f, nil
+func (fs *staticFsys) Clone(f *staticFileQ) *staticFileQ {
+	return f
+}
+
+func (fs *staticFsys) Clunk(f *staticFileQ) {
 }
 
 func (fs *staticFsys) Attach(ctx context.Context, _ **staticFileQ, uname, aname string) (*staticFileQ, error) {
@@ -71,7 +74,7 @@ func (fs *staticFsys) Stat(ctx context.Context, f *staticFileQ) (plan9.Dir, erro
 
 func (fs *staticFsys) makeDir(f *staticFileQ) plan9.Dir {
 	m := plan9.Perm(0o444)
-	if f.executable {
+	if f.executable || f.entries != nil {
 		m |= 0o111
 	}
 	length := uint64(0)

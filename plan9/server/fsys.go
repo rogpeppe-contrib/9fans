@@ -30,11 +30,13 @@ type Fsys[F Fid] interface {
 	//
 	// When an instance of F returned by Clone is no longer
 	// in use, it will be discarded by calling Clunk.
-	Clone(ctx context.Context, f F) (F, error)
+	//
+	// A fid that's been opened will never be cloned.
+	Clone(f F) F
 
 	// Clunk discards an instance of F. Clunk will never be called while there are any running
 	// I/O methods on f.
-	Clunk(ctx context.Context, f F)
+	Clunk(f F)
 
 	// Auth returns a new auth fid associated with the given user and attach name.
 	// TODO should the returned fid be considered open?
