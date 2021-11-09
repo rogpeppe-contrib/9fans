@@ -35,10 +35,6 @@ func (ErrorFsys[F]) Wstat(ctx context.Context, f F, dir plan9.Dir) error {
 	return errNotImplemented
 }
 
-func (ErrorFsys[F]) Clone(ctx context.Context, f F) (F, error) {
-	return *new(F), errNotImplemented
-}
-
 func (ErrorFsys[F]) Walk(ctx context.Context, f F, name string) (F, error) {
 	return *new(F), errNotImplemented
 }
@@ -63,9 +59,6 @@ func (ErrorFsys[F]) Remove(ctx context.Context, f F) error {
 	return errNotImplemented
 }
 
-func (ErrorFsys[F]) Clunk(ctx context.Context, f F) {
-}
-
 func (ErrorFsys[F]) Close() error {
 	return nil
 }
@@ -76,4 +69,15 @@ func (f qfid) Qid() plan9.Qid {
 	return plan9.Qid(f)
 }
 
-var _ Fsys[qfid] = ErrorFsys[qfid]{}
+type testErrorFsys struct {
+	ErrorFsys[qfid]
+}
+
+func (testErrorFsys) Clone(f qfid) qfid {
+	return f
+}
+
+func (testErrorFsys) Clunk(f qfid) {
+}
+
+var _ Fsys[qfid] = testErrorFsys{}
