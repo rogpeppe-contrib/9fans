@@ -68,6 +68,8 @@ type server[F Fid] struct {
 	operations map[uint8]func(srv *server[F], ctx context.Context, t *xtag[F], m *plan9.Fcall) error
 }
 
+const debug = false
+
 func Serve[F Fid](ctx context.Context, conn io.ReadWriter, fs Fsys[F]) error {
 	srv := &server[F]{
 		conn: conn,
@@ -84,7 +86,7 @@ func Serve[F Fid](ctx context.Context, conn io.ReadWriter, fs Fsys[F]) error {
 		},
 	}
 	defer fs.Close()
-	m, err := plan9.ReadFcall(conn)
+	m, err := srv.readMessage()
 	if err != nil {
 		return err
 	}
@@ -106,7 +108,7 @@ func Serve[F Fid](ctx context.Context, conn io.ReadWriter, fs Fsys[F]) error {
 		Msize:   m.Msize,
 	})
 	for {
-		m, err := plan9.ReadFcall(conn)
+		m, err := srv.readMessage()
 		if err != nil {
 			if err == io.EOF {
 				return nil
@@ -128,7 +130,7 @@ func Serve[F Fid](ctx context.Context, conn io.ReadWriter, fs Fsys[F]) error {
 	}
 }
 
-// TODO	Auth(ctx context.Context, uname, aname string) (F, error)
+// Auth(ctx context.Context, uname, aname string) (F, error)
 
 func (srv *server[F]) handleAttach(ctx context.Context, t *xtag[F], m *plan9.Fcall) error {
 	//ctx = srv.newContext(ctx, m.Tag) TODO when flush is implemented
@@ -364,14 +366,28 @@ func (srv *server[F]) replyError(t *xtag[F], err error) {
 
 func (srv *server[F]) reply(t *xtag[F], m *plan9.Fcall) {
 	m.Tag = t.m.Tag
-	fail := m.Tag == plan9.Rerror || m.Tag == plan9.Rwalk && len(m.Wqid) < len(m.Wname)
+	fail := m.Type == plan9.Rerror || m.Type == plan9.Rwalk && len(m.Wqid) < len(m.Wname)
 	srv.releaseTag(t, !fail)
 	srv.sendMessage(m)
 }
 
 func (srv *server[F]) sendMessage(m *plan9.Fcall) {
+	if debug {
+		fmt.Printf("-> %v\n", m)
+	}
 	// TODO if there's a write error, close the server?
 	plan9.WriteFcall(srv.conn, m)
+}
+
+func (srv *server[F]) readMessage() (*plan9.Fcall, error) {
+	m, err := plan9.ReadFcall(srv.conn)
+	if err != nil {
+		return nil, err
+	}
+	if debug {
+		fmt.Printf("<- %v\n", m)
+	}
+	return m, nil
 }
 
 func (srv *server[F]) handleFlush(m *plan9.Fcall) error {
