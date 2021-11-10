@@ -134,8 +134,8 @@ func (srv *server[F]) handleAttach(ctx context.Context, t *xtag[F], m *plan9.Fca
 	//ctx = srv.newContext(ctx, m.Tag) TODO when flush is implemented
 	go func() {
 		var afidp *F
-		if t.newFid != nil {
-			afidp = ref(t.newFid.fid)
+		if t.fid != nil {
+			afidp = ref(t.fid.fid)
 		}
 		f, err := srv.fs.Attach(ctx, afidp, m.Uname, m.Aname)
 		if err != nil {
