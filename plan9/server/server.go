@@ -279,10 +279,13 @@ func (srv *server[F]) handleRead(ctx context.Context, t *xtag[F], m *plan9.Fcall
 		}
 		buf := make([]byte, min(t.fid.iounit, m.Count))
 		n, err := srv.fs.ReadAt(ctx, t.fid.fid, buf, offset)
-		if err != nil {
+		if err != nil && err != io.EOF && n == 0 {
 			srv.replyError(t, err)
 			return
 		}
+		// We might be ignoring an error here if it's returned along
+		// with some bytes, but we'll hope that if the client
+		// reissues the read they'll probably get the error again.
 		srv.reply(t, &plan9.Fcall{
 			Type: plan9.Rread,
 			Data: buf[:n],
