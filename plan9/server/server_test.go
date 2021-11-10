@@ -1,42 +1,50 @@
-package server
+package server_test
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net"
 	"path"
 	"sort"
+	"strings"
 	"testing"
+
+	qt "github.com/frankban/quicktest"
+	"github.com/google/go-cmp/cmp/cmpopts"
 
 	"9fans.net/go/plan9"
 	"9fans.net/go/plan9/client"
-	qt "github.com/frankban/quicktest"
-	"github.com/google/go-cmp/cmp/cmpopts"
+	"9fans.net/go/plan9/server"
+	"9fans.net/go/plan9/server/staticfsys"
 )
 
+type stringEntry = staticfsys.Entry[string]
+
 func TestServerOpenRead(t *testing.T) {
-	fs0, err := NewStaticFsys(map[string]StaticFile{
-		"foo": {
-			Content: []byte("bar"),
-		},
-		"info": {
-			Entries: map[string]StaticFile{
-				"version": {
-					Content: []byte("something new"),
-				},
-				"other": {
-					Content: bytes.Repeat([]byte("a"), 1024*1024),
+	fs0, err := staticfsys.New(staticfsys.Params[string]{
+		Root: map[string]stringEntry{
+			"foo": {
+				Content: "bar",
+			},
+			"info": {
+				Entries: map[string]stringEntry{
+					"version": {
+						Content: "something new",
+					},
+					"other": {
+						Content: strings.Repeat("a", 1024*1024),
+					},
 				},
 			},
 		},
+		Opener: staticfsys.AlwaysOpen(staticfsys.OpenString),
 	})
 	qt.Assert(t, err, qt.IsNil)
 	c0, c1 := net.Pipe()
 	errc := make(chan error, 1)
 	go func() {
-		err := Serve(context.Background(), c0, fs0)
+		err := server.Serve(context.Background(), c0, server.Fsys[*staticfsys.Fid[string]](fs0))
 		t.Logf("Serve finished; error: %v", err)
 		c0.Close()
 		errc <- err
@@ -93,24 +101,27 @@ func TestServerOpenRead(t *testing.T) {
 }
 
 func TestWalkDeep(t *testing.T) {
-	file := StaticFile{
-		Content: []byte("something"),
+	file := stringEntry{
+		Content: "something",
 	}
 	n := plan9.MAXWELEM * 3
 	for i := n - 1; i >= 0; i-- {
-		file = StaticFile{
-			Entries: map[string]StaticFile{
+		file = stringEntry{
+			Entries: map[string]stringEntry{
 				fmt.Sprint("dir", i): file,
 			},
 		}
 	}
-	fs0, err := NewStaticFsys(file.Entries)
+	fs0, err := staticfsys.New(staticfsys.Params[string]{
+		Root:   file.Entries,
+		Opener: staticfsys.AlwaysOpen(staticfsys.OpenString),
+	})
 	qt.Assert(t, err, qt.IsNil)
 
 	c0, c1 := net.Pipe()
 	errc := make(chan error, 1)
 	go func() {
-		err := Serve(context.Background(), c0, fs0)
+		err := server.Serve(context.Background(), c0, server.Fsys[*staticfsys.Fid[string]](fs0))
 		t.Logf("Serve finished; error: %v", err)
 		c0.Close()
 		errc <- err
