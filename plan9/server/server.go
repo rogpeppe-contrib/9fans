@@ -11,6 +11,8 @@ import (
 	"9fans.net/go/plan9"
 )
 
+const debug = false
+
 type fid[F Fid] struct {
 	id uint32
 
@@ -68,8 +70,6 @@ type server[F Fid] struct {
 	operations map[uint8]func(srv *server[F], ctx context.Context, t *xtag[F], m *plan9.Fcall) error
 }
 
-const debug = false
-
 func Serve[F Fid](ctx context.Context, conn io.ReadWriter, fs Fsys[F]) error {
 	srv := &server[F]{
 		conn: conn,
@@ -81,6 +81,7 @@ func Serve[F Fid](ctx context.Context, conn io.ReadWriter, fs Fsys[F]) error {
 			plan9.Tstat:   (*server[F]).handleStat,
 			plan9.Twalk:   (*server[F]).handleWalk,
 			plan9.Tread:   (*server[F]).handleRead,
+			plan9.Twrite:  (*server[F]).handleWrite,
 			plan9.Topen:   (*server[F]).handleOpen,
 			plan9.Tclunk:  (*server[F]).handleClunk,
 		},
@@ -121,7 +122,7 @@ func Serve[F Fid](ctx context.Context, conn io.ReadWriter, fs Fsys[F]) error {
 		}
 		op := srv.operations[m.Type]
 		if op == nil {
-			srv.replyError(t, fmt.Errorf("bad operation type"))
+			srv.replyError(t, fmt.Errorf("bad operation type %v", m.Type))
 			continue
 		}
 		if err := op(srv, ctx, t, m); err != nil {
@@ -268,7 +269,7 @@ func (srv *server[F]) handleRead(ctx context.Context, t *xtag[F], m *plan9.Fcall
 		return errPerm
 	}
 	offset := int64(m.Offset)
-	if offset < 0 {
+	if offset < 0 || offset+int64(m.Count) < 0 {
 		return fmt.Errorf("offset too big")
 	}
 	go func() {
@@ -285,12 +286,43 @@ func (srv *server[F]) handleRead(ctx context.Context, t *xtag[F], m *plan9.Fcall
 			srv.replyError(t, err)
 			return
 		}
-		// We might be ignoring an error here if it's returned along
+		// TODO We might be ignoring an error here if it's returned along
 		// with some bytes, but we'll hope that if the client
 		// reissues the read they'll probably get the error again.
 		srv.reply(t, &plan9.Fcall{
 			Type: plan9.Rread,
 			Data: buf[:n],
+		})
+	}()
+	return nil
+}
+
+func (srv *server[F]) handleWrite(ctx context.Context, t *xtag[F], m *plan9.Fcall) error {
+	if !t.fid.open {
+		return fmt.Errorf("fid not open")
+	}
+	if !canWrite(t.fid.openMode) {
+		return fmt.Errorf("cannot write; omode %v", t.fid.openMode)
+		return errPerm
+	}
+	if t.fid.fid.Qid().IsDir() {
+		return fmt.Errorf("cannot write to a directory")
+	}
+	offset := int64(m.Offset)
+	if offset < 0 || offset+int64(len(m.Data)) < 0 {
+		return fmt.Errorf("offset too big")
+	}
+	go func() {
+		n, err := srv.fs.WriteAt(ctx, t.fid.fid, m.Data, offset)
+		if err != nil {
+			// TODO We're ignoring the fact that WriteAt might have written
+			// some bytes here.
+			srv.replyError(t, err)
+			return
+		}
+		srv.reply(t, &plan9.Fcall{
+			Type:  plan9.Rwrite,
+			Count: uint32(n),
 		})
 	}()
 	return nil
@@ -581,8 +613,16 @@ func (srv *server[F]) releaseTag(t *xtag[F], success bool) {
 }
 
 func canRead(mode uint8) bool {
-	switch mode &^ 3 {
+	switch mode & 3 {
 	case plan9.OREAD, plan9.ORDWR, plan9.OEXEC:
+		return true
+	}
+	return false
+}
+
+func canWrite(mode uint8) bool {
+	switch mode & 3 {
+	case plan9.OWRITE, plan9.ORDWR:
 		return true
 	}
 	return false

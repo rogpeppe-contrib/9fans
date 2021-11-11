@@ -76,19 +76,17 @@ func TestServerOpenRead(t *testing.T) {
 		Qid: plan9.Qid{
 			Path: 4,
 		},
-		Uid:    "noone",
-		Gid:    "noone",
-		Mode:   0o444,
-		Length: 1024 * 1024,
+		Uid:  "noone",
+		Gid:  "noone",
+		Mode: 0o444,
 	}, {
 		Name: "version",
 		Qid: plan9.Qid{
 			Path: 5,
 		},
-		Uid:    "noone",
-		Gid:    "noone",
-		Mode:   0o444,
-		Length: uint64(len("something new")),
+		Uid:  "noone",
+		Gid:  "noone",
+		Mode: 0o444,
 	}})
 	err = f.Close()
 	qt.Assert(t, err, qt.IsNil)

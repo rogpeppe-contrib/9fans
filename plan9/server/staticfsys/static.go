@@ -41,8 +41,6 @@ type entry[Content any] struct {
 	entries    []*entry[Content]
 }
 
-type OpenFunc[Content any] func(Content) (File, error)
-
 type Params[Content any] struct {
 	Root map[string]Entry[Content]
 
@@ -56,7 +54,7 @@ type Params[Content any] struct {
 	// derived from that attach. If it returns an error, the Attach
 	// will fail.
 	//
-	// If this is nil, we could provide a default version that works for
+	// TODO If this is nil, we could provide a default version that works for
 	// some content types.
 	Opener func(aname string) (func(Content) (File, error), error)
 
@@ -123,7 +121,7 @@ func (fs *Fsys[Content]) Root(open func(c Content) (File, error)) *Fid[Content] 
 }
 
 func (fs *Fsys[Content]) Clone(f *Fid[Content]) *Fid[Content] {
-	return f
+	return ref(*f)
 }
 
 func (fs *Fsys[Content]) Clunk(f *Fid[Content]) {
@@ -256,4 +254,8 @@ func calcQids[Content any](fname string, f Entry[Content], path string, qpath ui
 		qpath = qp
 	}
 	return qf, qpath, nil
+}
+
+func ref[T any](x T) *T {
+	return &x
 }
