@@ -41,22 +41,21 @@ type entry[Content any] struct {
 	entries    []*entry[Content]
 }
 
-type Params[Content any] struct {
+type Params[Context, Content any] struct {
 	Root map[string]Entry[Content]
 
-	// Open is called when an Entry is opened and passed the
-	// Content field from that entry. This will not be used for
-	// fids created with the Fsys.Root method or any fids derived from those -
-	// in that case the open function passed into Root will be used.
-
-	// Opener is called when an Attach call is made with the given
-	// aname. It returns a function that will be used to open files
-	// derived from that attach. If it returns an error, the Attach
-	// will fail.
+	// Open is called when a Fid is opened. I/O operations on the
+	// open fid will be invoked on the returned File. If this is nil,
+	// New will return an error.
 	//
 	// TODO If this is nil, we could provide a default version that works for
 	// some content types.
-	Opener func(aname string) (func(Content) (File, error), error)
+	Open func(*Fid[Context, Content]) (File, error)
+
+	// ContextForAttach returns the context data to associate with
+	// a fid created with an Attach call. If it's nil, the zero value
+	// for Context will be used.
+	ContextForAttach func(uname, aname string) (Context, error)
 
 	// Uid and Gid are used for the user and group names
 	// of all the files. If they're blank, "noone" will be used.
@@ -64,39 +63,45 @@ type Params[Content any] struct {
 	Gid string
 }
 
-type Fid[Content any] struct {
-	entry *entry[Content]
-	open  func(Content) (File, error)
-	file  File
+type Fid[Context, Content any] struct {
+	entry   *entry[Content]
+	file    File
+	context Context
 }
 
-func (f *Fid[Content]) Qid() plan9.Qid {
+func (f *Fid[Context, Content]) Qid() plan9.Qid {
 	return f.entry.qid
 }
 
-var _ server.Fsys[*Fid[struct{}]] = (*Fsys[struct{}])(nil)
-
-// Fsys implements server.Fsys[Fid] by serving content with a static
-// directory structure as defined in Params.
-//
-// It also implements an extra method, Root, that can be used to
-// associate arbitrary data with a fid in addition to the content
-// that's associated with each entry.
-type Fsys[Content any] struct {
-	server.ErrorFsys[*Fid[Content]]
-	root     *entry[Content]
-	opener   func(aname string) (func(Content) (File, error), error)
-	uid, gid string
+func (f *Fid[Context, Content]) Content() Content {
+	return f.entry.content
 }
 
-// New returns an instance of server.Fsys[*Fid[Content]] that serves
+func (f *Fid[Context, Content]) Context() Context {
+	return f.context
+}
+
+// fsys implements server.FsysInner by serving content with a static
+// directory structure as defined in Params.
+type fsys[Context, Content any] struct {
+	server.ErrorFsys[*Fid[Context, Content]]
+	root             *entry[Content]
+	contextForAttach func(uname, aname string) (Context, error)
+	open             func(*Fid[Context, Content]) (File, error)
+	uid, gid         string
+}
+
+// New returns an instance of server.FsysInner that serves
 // a statically defined directory structure.
-func New[Content any](p Params[Content]) (*Fsys[Content], error) {
+func New[Context, Content any](p Params[Context, Content]) (server.FsysInner[*Fid[Context, Content], Context], error) {
 	if p.Uid == "" {
 		p.Uid = "noone"
 	}
 	if p.Gid == "" {
 		p.Gid = "noone"
+	}
+	if p.Open == nil {
+		return nil, fmt.Errorf("no Open parameter provided")
 	}
 	root := Entry[Content]{
 		Entries: p.Root,
@@ -105,26 +110,27 @@ func New[Content any](p Params[Content]) (*Fsys[Content], error) {
 	if err != nil {
 		return nil, fmt.Errorf("bad file tree: %v", err)
 	}
-	return &Fsys[Content]{
-		root:   root1,
-		uid:    p.Uid,
-		gid:    p.Gid,
-		opener: p.Opener,
+	return &fsys[Context, Content]{
+		root:             root1,
+		uid:              p.Uid,
+		gid:              p.Gid,
+		open:             p.Open,
+		contextForAttach: p.ContextForAttach,
 	}, nil
 }
 
-func (fs *Fsys[Content]) Root(open func(c Content) (File, error)) *Fid[Content] {
-	return &Fid[Content]{
-		entry: fs.root,
-		open:  open,
-	}
+func (fs *fsys[Context, Content]) AttachInner(ctx context.Context, c Context) (*Fid[Context, Content], error) {
+	return &Fid[Context, Content]{
+		entry:   fs.root,
+		context: c,
+	}, nil
 }
 
-func (fs *Fsys[Content]) Clone(f *Fid[Content]) *Fid[Content] {
+func (fs *fsys[Context, Content]) Clone(f *Fid[Context, Content]) *Fid[Context, Content] {
 	return ref(*f)
 }
 
-func (fs *Fsys[Content]) Clunk(f *Fid[Content]) {
+func (fs *fsys[Context, Content]) Clunk(f *Fid[Context, Content]) {
 	if f.file != nil {
 		// TODO this is one of those places where we'd like to be able
 		// to return an error from Clunk (or have a separate Close op for
@@ -134,25 +140,26 @@ func (fs *Fsys[Content]) Clunk(f *Fid[Content]) {
 	}
 }
 
-func (fs *Fsys[Content]) Attach(ctx context.Context, _ **Fid[Content], uname, aname string) (*Fid[Content], error) {
-	if fs.opener == nil {
-		return nil, fmt.Errorf("cannot attach because no root open function was provided")
+func (fs *fsys[Context, Content]) Attach(ctx context.Context, _ **Fid[Context, Content], uname, aname string) (*Fid[Context, Content], error) {
+	var c Context
+	if fs.contextForAttach != nil {
+		c1, err := fs.contextForAttach(uname, aname)
+		if err != nil {
+			return nil, err
+		}
+		c = c1
 	}
-	openFunc, err := fs.opener(aname)
-	if err != nil {
-		return nil, err
-	}
-	return &Fid[Content]{
-		entry: fs.root,
-		open:  openFunc,
+	return &Fid[Context, Content]{
+		entry:   fs.root,
+		context: c,
 	}, nil
 }
 
-func (fs *Fsys[Content]) Stat(ctx context.Context, f *Fid[Content]) (plan9.Dir, error) {
+func (fs *fsys[Context, Content]) Stat(ctx context.Context, f *Fid[Context, Content]) (plan9.Dir, error) {
 	return fs.makeDir(f.entry), nil
 }
 
-func (fs *Fsys[Content]) makeDir(e *entry[Content]) plan9.Dir {
+func (fs *fsys[Context, Content]) makeDir(e *entry[Content]) plan9.Dir {
 	m := plan9.Perm(0o444)
 	if e.executable || e.entries != nil {
 		m |= 0o111
@@ -170,7 +177,7 @@ func (fs *Fsys[Content]) makeDir(e *entry[Content]) plan9.Dir {
 	}
 }
 
-func (fs *Fsys[Content]) Walk(ctx context.Context, f *Fid[Content], name string) (*Fid[Content], error) {
+func (fs *fsys[Context, Content]) Walk(ctx context.Context, f *Fid[Context, Content], name string) (*Fid[Context, Content], error) {
 	for _, e := range f.entry.entries {
 		if e.name == name {
 			f.entry = e
@@ -180,7 +187,7 @@ func (fs *Fsys[Content]) Walk(ctx context.Context, f *Fid[Content], name string)
 	return nil, errNotFound
 }
 
-func (fs *Fsys[Content]) Readdir(ctx context.Context, f *Fid[Content], dir []plan9.Dir, index int) (int, error) {
+func (fs *fsys[Context, Content]) Readdir(ctx context.Context, f *Fid[Context, Content], dir []plan9.Dir, index int) (int, error) {
 	entries := f.entry.entries
 	if index >= len(entries) {
 		index = len(entries)
@@ -191,11 +198,11 @@ func (fs *Fsys[Content]) Readdir(ctx context.Context, f *Fid[Content], dir []pla
 	return len(entries) - index, nil
 }
 
-func (fs *Fsys[Content]) Open(ctx context.Context, f *Fid[Content], mode uint8) (*Fid[Content], uint32, error) {
+func (fs *fsys[Context, Content]) Open(ctx context.Context, f *Fid[Context, Content], mode uint8) (*Fid[Context, Content], uint32, error) {
 	if f.entry.entries != nil {
 		return f, 0, nil
 	}
-	file, err := f.open(f.entry.content)
+	file, err := fs.open(f)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -203,11 +210,11 @@ func (fs *Fsys[Content]) Open(ctx context.Context, f *Fid[Content], mode uint8) 
 	return f, 0, nil
 }
 
-func (fs *Fsys[Content]) ReadAt(ctx context.Context, f *Fid[Content], buf []byte, off int64) (int, error) {
+func (fs *fsys[Context, Content]) ReadAt(ctx context.Context, f *Fid[Context, Content], buf []byte, off int64) (int, error) {
 	return f.file.ReadAt(buf, off)
 }
 
-func (fs *Fsys[Content]) WriteAt(ctx context.Context, f *Fid[Content], buf []byte, off int64) (int, error) {
+func (fs *fsys[Context, Content]) WriteAt(ctx context.Context, f *Fid[Context, Content], buf []byte, off int64) (int, error) {
 	return f.file.WriteAt(buf, off)
 }
 

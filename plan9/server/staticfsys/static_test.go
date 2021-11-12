@@ -38,7 +38,11 @@ func (e entryType) String() string {
 type entry = staticfsys.Entry[entryType]
 
 func TestServerReadWithThreadedData(t *testing.T) {
-	fs0, err := staticfsys.New(staticfsys.Params[entryType]{
+	type attachData struct {
+		aname string
+		other staticfsys.File
+	}
+	fs0, err := staticfsys.New(staticfsys.Params[attachData, entryType]{
 		Root: map[string]entry{
 			"foo": {
 				Content: entryFoo,
@@ -54,21 +58,26 @@ func TestServerReadWithThreadedData(t *testing.T) {
 				},
 			},
 		},
-		Opener: func(aname string) (func(entryType) (staticfsys.File, error), error) {
-			other := staticfsys.NewBuffer(1024)
-			return func(t entryType) (staticfsys.File, error) {
-				if t == entryInfoOther {
-					return other, nil
-				}
-				return staticfsys.OpenString(fmt.Sprintf("aname=%q %v", aname, t))
+		ContextForAttach: func(uname, aname string) (attachData, error) {
+			return attachData{
+				aname: aname,
+				other: staticfsys.NewBuffer(1024),
 			}, nil
+		},
+		Open: func(f *staticfsys.Fid[attachData, entryType]) (staticfsys.File, error) {
+			c := f.Context()
+			t := f.Content()
+			if t == entryInfoOther {
+				return c.other, nil
+			}
+			return staticfsys.OpenString(fmt.Sprintf("aname=%q %v", c.aname, t))
 		},
 	})
 	qt.Assert(t, err, qt.IsNil)
 	c0, c1 := net.Pipe()
 	errc := make(chan error, 1)
 	go func() {
-		err := server.Serve(context.Background(), c0, server.Fsys[*staticfsys.Fid[entryType]](fs0))
+		err := server.Serve(context.Background(), c0, server.Fsys[*staticfsys.Fid[attachData, entryType]](fs0))
 		t.Logf("Serve finished; error: %v", err)
 		c0.Close()
 		errc <- err

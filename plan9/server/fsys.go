@@ -15,6 +15,18 @@ type Fid interface {
 	Qid() plan9.Qid
 }
 
+// FsysInner represents a filesystem that can be wrapped by another
+// filesystem (such as clonefsys.Fsys).
+type FsysInner[F Fid, C any] interface {
+	Fsys[F]
+	// AttachInner returns a fid that is associated with the
+	// given "attach context" c. This method is not called
+	// directly by Server as part of any 9P call, but is
+	// used to propagate fid-specific data through a fileserver
+	// tree.
+	AttachInner(ctx context.Context, c C) (F, error)
+}
+
 // Fsys represents the interface that must be implemented
 // in order to provide a 9p server.
 //

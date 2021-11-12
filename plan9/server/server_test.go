@@ -22,7 +22,7 @@ import (
 type stringEntry = staticfsys.Entry[string]
 
 func TestServerOpenRead(t *testing.T) {
-	fs0, err := staticfsys.New(staticfsys.Params[string]{
+	fs0, err := staticfsys.New(staticfsys.Params[struct{}, string]{
 		Root: map[string]stringEntry{
 			"foo": {
 				Content: "bar",
@@ -38,13 +38,15 @@ func TestServerOpenRead(t *testing.T) {
 				},
 			},
 		},
-		Opener: staticfsys.AlwaysOpen(staticfsys.OpenString),
+		Open: func(f *staticfsys.Fid[struct{}, string]) (staticfsys.File, error) {
+			return staticfsys.OpenString(f.Content())
+		},
 	})
 	qt.Assert(t, err, qt.IsNil)
 	c0, c1 := net.Pipe()
 	errc := make(chan error, 1)
 	go func() {
-		err := server.Serve(context.Background(), c0, server.Fsys[*staticfsys.Fid[string]](fs0))
+		err := server.Serve(context.Background(), c0, server.Fsys[*staticfsys.Fid[struct{}, string]](fs0))
 		t.Logf("Serve finished; error: %v", err)
 		c0.Close()
 		errc <- err
@@ -110,16 +112,18 @@ func TestWalkDeep(t *testing.T) {
 			},
 		}
 	}
-	fs0, err := staticfsys.New(staticfsys.Params[string]{
-		Root:   file.Entries,
-		Opener: staticfsys.AlwaysOpen(staticfsys.OpenString),
+	fs0, err := staticfsys.New(staticfsys.Params[struct{}, string]{
+		Root: file.Entries,
+		Open: func(f *staticfsys.Fid[struct{}, string]) (staticfsys.File, error) {
+			return staticfsys.OpenString(f.Content())
+		},
 	})
 	qt.Assert(t, err, qt.IsNil)
 
 	c0, c1 := net.Pipe()
 	errc := make(chan error, 1)
 	go func() {
-		err := server.Serve(context.Background(), c0, server.Fsys[*staticfsys.Fid[string]](fs0))
+		err := server.Serve(context.Background(), c0, server.Fsys[*staticfsys.Fid[struct{}, string]](fs0))
 		t.Logf("Serve finished; error: %v", err)
 		c0.Close()
 		errc <- err
