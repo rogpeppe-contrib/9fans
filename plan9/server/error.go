@@ -17,7 +17,7 @@ var (
 // when not all operations are implemented.
 //
 // It reports 64 for QidBits.
-type ErrorFsys[F Fid] struct{}
+type ErrorFsys[F any] struct{}
 
 func (ErrorFsys[F]) Auth(ctx context.Context, dst *F, uname, aname string) error {
 	return errNotImplemented

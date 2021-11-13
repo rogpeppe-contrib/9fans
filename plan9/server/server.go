@@ -13,7 +13,7 @@ import (
 
 const debug = false
 
-type fid[F Fid] struct {
+type fid[Fid any] struct {
 	id uint32
 
 	// 1 for the fid table + 1 for every operation currently running on it.
@@ -24,7 +24,7 @@ type fid[F Fid] struct {
 	mu rwMutex
 
 	// fid holds the associated Fsys data.
-	fid F
+	fid Fid
 
 	// attached holds whether the fid has been attached
 	// (i.e. whether the fid field is valid)
@@ -56,38 +56,38 @@ type fid[F Fid] struct {
 	dirEntryBuf []plan9.Dir
 }
 
-type xtag[F Fid] struct {
+type xtag[Fid any] struct {
 	m *plan9.Fcall
 	// fid holds the existing fid associated with the operation, if any.
-	fid *fid[F]
+	fid *fid[Fid]
 	// excl holds whether the above fid has been exclusively locked.
 	excl bool
 	// newFid holds the new fid being created by the operation, if any.
-	newFid *fid[F]
+	newFid *fid[Fid]
 }
 
-type server[F Fid] struct {
-	fs         Fsys[F]
+type server[Fid any] struct {
+	fs         Fsys[Fid]
 	conn       io.ReadWriter
 	mu         sync.Mutex
-	fids       map[uint32]*fid[F]
-	operations map[uint8]func(srv *server[F], ctx context.Context, t *xtag[F], m *plan9.Fcall) error
+	fids       map[uint32]*fid[Fid]
+	operations map[uint8]func(srv *server[Fid], ctx context.Context, t *xtag[Fid], m *plan9.Fcall) error
 }
 
-func Serve[F Fid](ctx context.Context, conn io.ReadWriter, fs Fsys[F]) error {
-	srv := &server[F]{
+func Serve[Fid any](ctx context.Context, conn io.ReadWriter, fs Fsys[Fid]) error {
+	srv := &server[Fid]{
 		conn: conn,
 		fs:   fs,
-		fids: make(map[uint32]*fid[F]),
-		operations: map[uint8]func(srv *server[F], ctx context.Context, t *xtag[F], m *plan9.Fcall) error{
+		fids: make(map[uint32]*fid[Fid]),
+		operations: map[uint8]func(srv *server[Fid], ctx context.Context, t *xtag[Fid], m *plan9.Fcall) error{
 			//plan9.Tauth: (*server[F]).handleAuth,
-			plan9.Tattach: (*server[F]).handleAttach,
-			plan9.Tstat:   (*server[F]).handleStat,
-			plan9.Twalk:   (*server[F]).handleWalk,
-			plan9.Tread:   (*server[F]).handleRead,
-			plan9.Twrite:  (*server[F]).handleWrite,
-			plan9.Topen:   (*server[F]).handleOpen,
-			plan9.Tclunk:  (*server[F]).handleClunk,
+			plan9.Tattach: (*server[Fid]).handleAttach,
+			plan9.Tstat:   (*server[Fid]).handleStat,
+			plan9.Twalk:   (*server[Fid]).handleWalk,
+			plan9.Tread:   (*server[Fid]).handleRead,
+			plan9.Twrite:  (*server[Fid]).handleWrite,
+			plan9.Topen:   (*server[Fid]).handleOpen,
+			plan9.Tclunk:  (*server[Fid]).handleClunk,
 		},
 	}
 	defer fs.Close()
@@ -137,10 +137,10 @@ func Serve[F Fid](ctx context.Context, conn io.ReadWriter, fs Fsys[F]) error {
 
 // Auth(ctx context.Context, uname, aname string) (F, error)
 
-func (srv *server[F]) handleAttach(ctx context.Context, t *xtag[F], m *plan9.Fcall) error {
+func (srv *server[Fid]) handleAttach(ctx context.Context, t *xtag[Fid], m *plan9.Fcall) error {
 	//ctx = srv.newContext(ctx, m.Tag) TODO when flush is implemented
 	go func() {
-		var afid *F
+		var afid *Fid
 		if t.fid != nil {
 			afid = &t.fid.fid
 		}
@@ -163,7 +163,7 @@ func (srv *server[F]) handleAttach(ctx context.Context, t *xtag[F], m *plan9.Fca
 	return nil
 }
 
-func (srv *server[F]) handleStat(ctx context.Context, t *xtag[F], m *plan9.Fcall) error {
+func (srv *server[Fid]) handleStat(ctx context.Context, t *xtag[Fid], m *plan9.Fcall) error {
 	go func() {
 		dir, err := srv.fs.Stat(ctx, &t.fid.fid)
 		if err != nil {
@@ -184,7 +184,7 @@ func (srv *server[F]) handleStat(ctx context.Context, t *xtag[F], m *plan9.Fcall
 	return nil
 }
 
-func (srv *server[F]) handleWalk(ctx context.Context, t *xtag[F], m *plan9.Fcall) error {
+func (srv *server[Fid]) handleWalk(ctx context.Context, t *xtag[Fid], m *plan9.Fcall) error {
 	if t.fid.open {
 		return fmt.Errorf("cannot walk open fid")
 	}
@@ -202,15 +202,15 @@ func (srv *server[F]) handleWalk(ctx context.Context, t *xtag[F], m *plan9.Fcall
 	return nil
 }
 
-func (srv *server[F]) walk(ctx context.Context, fid, newFid *fid[F], names []string) (rqids []plan9.Qid, rerr error) {
-	var newf *F
+func (srv *server[Fid]) walk(ctx context.Context, fid, newFid *fid[Fid], names []string) (rqids []plan9.Qid, rerr error) {
+	var newf *Fid
 	if newFid != nil {
 		newf = &newFid.fid
 	} else {
 		// Make a temporary clone so that we don't
 		// side-effect the original if we fail half way through
 		// walking.
-		newf = new(F)
+		newf = new(Fid)
 	}
 	srv.fs.Clone(newf, &fid.fid)
 	qids := make([]plan9.Qid, 0, len(names))
@@ -231,7 +231,7 @@ func (srv *server[F]) walk(ctx context.Context, fid, newFid *fid[F], names []str
 	return qids, nil
 }
 
-func (srv *server[F]) handleOpen(ctx context.Context, t *xtag[F], m *plan9.Fcall) error {
+func (srv *server[Fid]) handleOpen(ctx context.Context, t *xtag[Fid], m *plan9.Fcall) error {
 	if t.fid.open {
 		return fmt.Errorf("fid is already open")
 	}
@@ -265,7 +265,7 @@ func (srv *server[F]) handleOpen(ctx context.Context, t *xtag[F], m *plan9.Fcall
 	return nil
 }
 
-func (srv *server[F]) handleRead(ctx context.Context, t *xtag[F], m *plan9.Fcall) error {
+func (srv *server[Fid]) handleRead(ctx context.Context, t *xtag[Fid], m *plan9.Fcall) error {
 	if !t.fid.open {
 		return fmt.Errorf("fid not open")
 	}
@@ -301,7 +301,7 @@ func (srv *server[F]) handleRead(ctx context.Context, t *xtag[F], m *plan9.Fcall
 	return nil
 }
 
-func (srv *server[F]) handleWrite(ctx context.Context, t *xtag[F], m *plan9.Fcall) error {
+func (srv *server[Fid]) handleWrite(ctx context.Context, t *xtag[Fid], m *plan9.Fcall) error {
 	if !t.fid.open {
 		return fmt.Errorf("fid not open")
 	}
@@ -332,7 +332,7 @@ func (srv *server[F]) handleWrite(ctx context.Context, t *xtag[F], m *plan9.Fcal
 	return nil
 }
 
-func (srv *server[F]) readDir(ctx context.Context, t *xtag[F], offset int64, count uint32) error {
+func (srv *server[Fid]) readDir(ctx context.Context, t *xtag[Fid], offset int64, count uint32) error {
 	f := t.fid
 	// Acquire an exclusive lock so that we can mutate directory reading state without
 	// worrying about concurrent Tread operations.
@@ -385,7 +385,7 @@ func (srv *server[F]) readDir(ctx context.Context, t *xtag[F], offset int64, cou
 	return nil
 }
 
-func (srv *server[F]) handleClunk(ctx context.Context, t *xtag[F], m *plan9.Fcall) error {
+func (srv *server[Fid]) handleClunk(ctx context.Context, t *xtag[Fid], m *plan9.Fcall) error {
 	go func() {
 		srv.delFid(t.fid)
 		srv.reply(t, &plan9.Fcall{
@@ -396,21 +396,21 @@ func (srv *server[F]) handleClunk(ctx context.Context, t *xtag[F], m *plan9.Fcal
 	return nil
 }
 
-func (srv *server[F]) replyError(t *xtag[F], err error) {
+func (srv *server[Fid]) replyError(t *xtag[Fid], err error) {
 	srv.reply(t, &plan9.Fcall{
 		Type:  plan9.Rerror,
 		Ename: err.Error(),
 	})
 }
 
-func (srv *server[F]) reply(t *xtag[F], m *plan9.Fcall) {
+func (srv *server[Fid]) reply(t *xtag[Fid], m *plan9.Fcall) {
 	m.Tag = t.m.Tag
 	fail := m.Type == plan9.Rerror || m.Type == plan9.Rwalk && len(m.Wqid) < len(m.Wname)
 	srv.releaseTag(t, !fail)
 	srv.sendMessage(m)
 }
 
-func (srv *server[F]) sendMessage(m *plan9.Fcall) {
+func (srv *server[Fid]) sendMessage(m *plan9.Fcall) {
 	if debug {
 		fmt.Printf("-> %v\n", m)
 	}
@@ -418,7 +418,7 @@ func (srv *server[F]) sendMessage(m *plan9.Fcall) {
 	plan9.WriteFcall(srv.conn, m)
 }
 
-func (srv *server[F]) readMessage() (*plan9.Fcall, error) {
+func (srv *server[Fid]) readMessage() (*plan9.Fcall, error) {
 	m, err := plan9.ReadFcall(srv.conn)
 	if err != nil {
 		return nil, err
@@ -429,7 +429,7 @@ func (srv *server[F]) readMessage() (*plan9.Fcall, error) {
 	return m, nil
 }
 
-func (srv *server[F]) handleFlush(m *plan9.Fcall) error {
+func (srv *server[Fid]) handleFlush(m *plan9.Fcall) error {
 	panic("TODO")
 	// look for outstanding matching tag
 	// if it's found, cancel its context and wait for it to return,
@@ -441,27 +441,27 @@ func (srv *server[F]) handleFlush(m *plan9.Fcall) error {
 	// send its reply, we need to drop its fid reference.
 }
 
-func (srv *server[F]) newFid(id uint32) (*fid[F], error) {
+func (srv *server[Fid]) newFid(id uint32) (*fid[Fid], error) {
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
 	f, ok := srv.fids[id]
 	if ok {
 		return nil, fmt.Errorf("fid %d already in use", id)
 	}
-	f = &fid[F]{
+	f = &fid[Fid]{
 		id: id,
 	}
 	srv.fids[id] = f
 	return f, nil
 }
 
-func (srv *server[F]) releaseFid(f *fid[F]) {
+func (srv *server[Fid]) releaseFid(f *fid[Fid]) {
 	if atomic.AddInt32(&f.refCount, -1) == 0 && f.attached {
 		srv.fs.Clunk(&f.fid)
 	}
 }
 
-func (srv *server[F]) delFid(f *fid[F]) {
+func (srv *server[Fid]) delFid(f *fid[Fid]) {
 	srv.mu.Lock()
 	if _, ok := srv.fids[f.id]; !ok {
 		panic("delete of fid that's not in the fid table")
@@ -476,9 +476,9 @@ func (srv *server[F]) delFid(f *fid[F]) {
 // It acquires references to any fids in m and locks them appropriately.
 // When the tag is released (with releaseTag), the references will be
 // dropped and the locks unlocked.
-func (srv *server[F]) newTag(ctx context.Context, m *plan9.Fcall) *xtag[F] {
+func (srv *server[Fid]) newTag(ctx context.Context, m *plan9.Fcall) *xtag[Fid] {
 	// TODO add the tag to srv.tags.
-	t := &xtag[F]{
+	t := &xtag[Fid]{
 		m: m,
 	}
 	if err := srv.initTag(t, m); err != nil {
@@ -488,7 +488,7 @@ func (srv *server[F]) newTag(ctx context.Context, m *plan9.Fcall) *xtag[F] {
 	return t
 }
 
-func (srv *server[F]) initTag(t *xtag[F], m *plan9.Fcall) error {
+func (srv *server[Fid]) initTag(t *xtag[Fid], m *plan9.Fcall) error {
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
 	var nfid uint32 = plan9.NOFID
@@ -507,7 +507,7 @@ func (srv *server[F]) initTag(t *xtag[F], m *plan9.Fcall) error {
 		if ok {
 			return fmt.Errorf("fid %d already in use", nfid)
 		}
-		f = &fid[F]{
+		f = &fid[Fid]{
 			id: nfid,
 			// One reference for the fid table and one for the xtag.
 			refCount: 2,
@@ -592,7 +592,7 @@ func (srv *server[F]) initTag(t *xtag[F], m *plan9.Fcall) error {
 	return nil
 }
 
-func (srv *server[F]) releaseTag(t *xtag[F], success bool) {
+func (srv *server[Fid]) releaseTag(t *xtag[Fid], success bool) {
 	if t.fid != nil {
 		if t.excl {
 			t.fid.mu.unlock()
@@ -616,7 +616,7 @@ func (srv *server[F]) releaseTag(t *xtag[F], success bool) {
 	srv.delFid(t.newFid)
 }
 
-func (srv *server[F]) isDir(f *fid[F]) bool {
+func (srv *server[Fid]) isDir(f *fid[Fid]) bool {
 	return srv.fs.Qid(&f.fid).IsDir()
 }
 
@@ -641,12 +641,4 @@ func min[T constraints.Ordered](a, b T) T {
 		return a
 	}
 	return b
-}
-
-func isZero[T comparable](x T) bool {
-	return x == *new(T)
-}
-
-func ref[T any](x T) *T {
-	return &x
 }

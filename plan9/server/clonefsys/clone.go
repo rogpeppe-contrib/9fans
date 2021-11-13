@@ -26,7 +26,7 @@ const (
 var qidBits = bits.Len(uint(cloneMax))
 
 // Fid represents a fid for a file within the clone filesystem.
-type Fid[F server.Fid, C0 any] struct {
+type Fid[F, C0 any] struct {
 	c    C0
 	kind fidType
 	id   int
@@ -49,7 +49,7 @@ type Provider[C any] interface {
 	// obtain a mutex while we ask for info.
 }
 
-type fsys[F server.Fid, C0, C1 any] struct {
+type fsys[F, C0, C1 any] struct {
 	server.ErrorFsys[Fid[F, C0]]
 	mu       sync.Mutex
 	fs       server.FsysInner[F, C1]
@@ -66,7 +66,7 @@ type fsys[F server.Fid, C0, C1 any] struct {
 // When a fid is walked into one of the clones, the fs.AttachInner method is
 // used to create the fid to walk into; its context argument is taken from
 // a call to provider.Get.
-func New[C0, C1 any, F server.Fid](fs server.FsysInner[F, C1], provider func(C0) Provider[C1]) server.FsysInner[Fid[F, C0], C0] {
+func New[F, C0, C1 any](fs server.FsysInner[F, C1], provider func(C0) Provider[C1]) server.FsysInner[Fid[F, C0], C0] {
 	return &fsys[F, C0, C1]{
 		fs:       fs,
 		provider: provider,
@@ -211,12 +211,4 @@ func (fs *fsys[F, C0, C1]) ReadAt(ctx context.Context, f *Fid[F, C0], buf []byte
 
 func (fs *fsys[F, C0, C1]) entry(id int) plan9.Dir {
 	panic("TODO")
-}
-
-func ref[T any](x T) *T {
-	return &x
-}
-
-func isZero[F comparable](x F) bool {
-	return x == *new(F)
 }

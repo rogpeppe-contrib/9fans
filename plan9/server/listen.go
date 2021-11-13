@@ -9,7 +9,7 @@ import (
 	"9fans.net/go/plan9/client"
 )
 
-func ServeNet[F Fid](ctx context.Context, proto, addr string, fs Fsys[F]) error {
+func ServeNet[Fid any](ctx context.Context, proto, addr string, fs Fsys[Fid]) error {
 	lis, err := net.Listen(proto, addr)
 	if err != nil {
 		return err
@@ -28,7 +28,7 @@ func ServeNet[F Fid](ctx context.Context, proto, addr string, fs Fsys[F]) error 
 	}
 }
 
-func ServeLocal[F Fid](ctx context.Context, name string, fs Fsys[F]) error {
+func ServeLocal[Fid any](ctx context.Context, name string, fs Fsys[Fid]) error {
 	if name == "" {
 		return fmt.Errorf("9p server name is empty")
 	}
