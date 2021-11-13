@@ -69,10 +69,6 @@ type Fid[Context, Content any] struct {
 	context Context
 }
 
-func (f *Fid[Context, Content]) Qid() plan9.Qid {
-	return f.entry.qid
-}
-
 func (f *Fid[Context, Content]) Content() Content {
 	return f.entry.content
 }
@@ -84,7 +80,7 @@ func (f *Fid[Context, Content]) Context() Context {
 // fsys implements server.FsysInner by serving content with a static
 // directory structure as defined in Params.
 type fsys[Context, Content any] struct {
-	server.ErrorFsys[*Fid[Context, Content]]
+	server.ErrorFsys[Fid[Context, Content]]
 	root             *entry[Content]
 	contextForAttach func(uname, aname string) (Context, error)
 	open             func(*Fid[Context, Content]) (File, error)
@@ -93,7 +89,7 @@ type fsys[Context, Content any] struct {
 
 // New returns an instance of server.FsysInner that serves
 // a statically defined directory structure.
-func New[Context, Content any](p Params[Context, Content]) (server.FsysInner[*Fid[Context, Content], Context], error) {
+func New[Context, Content any](p Params[Context, Content]) (server.FsysInner[Fid[Context, Content], Context], error) {
 	if p.Uid == "" {
 		p.Uid = "noone"
 	}
@@ -119,15 +115,16 @@ func New[Context, Content any](p Params[Context, Content]) (server.FsysInner[*Fi
 	}, nil
 }
 
-func (fs *fsys[Context, Content]) AttachInner(ctx context.Context, c Context) (*Fid[Context, Content], error) {
-	return &Fid[Context, Content]{
+func (fs *fsys[Context, Content]) AttachInner(ctx context.Context, dst *Fid[Context, Content], c Context) error {
+	*dst = Fid[Context, Content]{
 		entry:   fs.root,
 		context: c,
-	}, nil
+	}
+	return nil
 }
 
-func (fs *fsys[Context, Content]) Clone(f *Fid[Context, Content]) *Fid[Context, Content] {
-	return ref(*f)
+func (fs *fsys[Context, Content]) Clone(dst, src *Fid[Context, Content]) {
+	*dst = *src
 }
 
 func (fs *fsys[Context, Content]) Clunk(f *Fid[Context, Content]) {
@@ -140,19 +137,24 @@ func (fs *fsys[Context, Content]) Clunk(f *Fid[Context, Content]) {
 	}
 }
 
-func (fs *fsys[Context, Content]) Attach(ctx context.Context, _ **Fid[Context, Content], uname, aname string) (*Fid[Context, Content], error) {
+func (fs *fsys[Context, Content]) Qid(f *Fid[Context, Content]) plan9.Qid {
+	return f.entry.qid
+}
+
+func (fs *fsys[Context, Content]) Attach(ctx context.Context, dst *Fid[Context, Content], _ *Fid[Context, Content], uname, aname string) error {
 	var c Context
 	if fs.contextForAttach != nil {
 		c1, err := fs.contextForAttach(uname, aname)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		c = c1
 	}
-	return &Fid[Context, Content]{
+	*dst = Fid[Context, Content]{
 		entry:   fs.root,
 		context: c,
-	}, nil
+	}
+	return nil
 }
 
 func (fs *fsys[Context, Content]) Stat(ctx context.Context, f *Fid[Context, Content]) (plan9.Dir, error) {
@@ -177,14 +179,14 @@ func (fs *fsys[Context, Content]) makeDir(e *entry[Content]) plan9.Dir {
 	}
 }
 
-func (fs *fsys[Context, Content]) Walk(ctx context.Context, f *Fid[Context, Content], name string) (*Fid[Context, Content], error) {
+func (fs *fsys[Context, Content]) Walk(ctx context.Context, f *Fid[Context, Content], name string) error {
 	for _, e := range f.entry.entries {
 		if e.name == name {
 			f.entry = e
-			return f, nil
+			return nil
 		}
 	}
-	return nil, errNotFound
+	return errNotFound
 }
 
 func (fs *fsys[Context, Content]) Readdir(ctx context.Context, f *Fid[Context, Content], dir []plan9.Dir, index int) (int, error) {
@@ -198,16 +200,16 @@ func (fs *fsys[Context, Content]) Readdir(ctx context.Context, f *Fid[Context, C
 	return len(entries) - index, nil
 }
 
-func (fs *fsys[Context, Content]) Open(ctx context.Context, f *Fid[Context, Content], mode uint8) (*Fid[Context, Content], uint32, error) {
+func (fs *fsys[Context, Content]) Open(ctx context.Context, f *Fid[Context, Content], mode uint8) (uint32, error) {
 	if f.entry.entries != nil {
-		return f, 0, nil
+		return 0, nil
 	}
 	file, err := fs.open(f)
 	if err != nil {
-		return nil, 0, err
+		return 0, err
 	}
 	f.file = file
-	return f, 0, nil
+	return 0, nil
 }
 
 func (fs *fsys[Context, Content]) ReadAt(ctx context.Context, f *Fid[Context, Content], buf []byte, off int64) (int, error) {

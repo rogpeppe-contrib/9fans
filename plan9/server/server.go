@@ -26,6 +26,10 @@ type fid[F Fid] struct {
 	// fid holds the associated Fsys data.
 	fid F
 
+	// attached holds whether the fid has been attached
+	// (i.e. whether the fid field is valid)
+	attached bool
+
 	// open holds whether the fid has been opened.
 	open bool
 
@@ -136,23 +140,24 @@ func Serve[F Fid](ctx context.Context, conn io.ReadWriter, fs Fsys[F]) error {
 func (srv *server[F]) handleAttach(ctx context.Context, t *xtag[F], m *plan9.Fcall) error {
 	//ctx = srv.newContext(ctx, m.Tag) TODO when flush is implemented
 	go func() {
-		var afidp *F
+		var afid *F
 		if t.fid != nil {
-			afidp = ref(t.fid.fid)
+			afid = &t.fid.fid
 		}
-		f, err := srv.fs.Attach(ctx, afidp, m.Uname, m.Aname)
+		err := srv.fs.Attach(ctx, &t.newFid.fid, afid, m.Uname, m.Aname)
 		if err != nil {
 			srv.replyError(t, err)
 			return
 		}
-		if !f.Qid().IsDir() {
+		t.newFid.attached = true
+		q := srv.fs.Qid(&t.newFid.fid)
+		if !q.IsDir() {
 			srv.replyError(t, fmt.Errorf("root is not a directory"))
 			return
 		}
-		t.newFid.fid = f
 		srv.reply(t, &plan9.Fcall{
 			Type: plan9.Rattach,
-			Qid:  f.Qid(),
+			Qid:  q,
 		})
 	}()
 	return nil
@@ -160,12 +165,12 @@ func (srv *server[F]) handleAttach(ctx context.Context, t *xtag[F], m *plan9.Fca
 
 func (srv *server[F]) handleStat(ctx context.Context, t *xtag[F], m *plan9.Fcall) error {
 	go func() {
-		dir, err := srv.fs.Stat(ctx, t.fid.fid)
+		dir, err := srv.fs.Stat(ctx, &t.fid.fid)
 		if err != nil {
 			srv.replyError(t, err)
 			return
 		}
-		dir.Qid = t.fid.fid.Qid()
+		dir.Qid = srv.fs.Qid(&t.fid.fid)
 		stat, err := dir.Bytes()
 		if err != nil {
 			srv.replyError(t, fmt.Errorf("cannot marshal Dir: %v", err))
@@ -185,7 +190,7 @@ func (srv *server[F]) handleWalk(ctx context.Context, t *xtag[F], m *plan9.Fcall
 	}
 	go func() {
 		qids, err := srv.walk(ctx, t.fid, t.newFid, m.Wname)
-		if len(qids) < len(m.Wname) && len(qids) == 0 {
+		if len(qids) == 0 && len(m.Wname) > 0 {
 			srv.replyError(t, err)
 			return
 		}
@@ -198,28 +203,31 @@ func (srv *server[F]) handleWalk(ctx context.Context, t *xtag[F], m *plan9.Fcall
 }
 
 func (srv *server[F]) walk(ctx context.Context, fid, newFid *fid[F], names []string) (rqids []plan9.Qid, rerr error) {
-	if newFid == nil {
-		newFid = fid
+	var newf *F
+	if newFid != nil {
+		newf = &newFid.fid
+	} else {
+		// Make a temporary clone so that we don't
+		// side-effect the original if we fail half way through
+		// walking.
+		newf = new(F)
 	}
-	newf := srv.fs.Clone(fid.fid)
-	defer func() {
-		if len(rqids) < len(names) {
-			srv.fs.Clunk(newf)
-		}
-	}()
+	srv.fs.Clone(newf, &fid.fid)
 	qids := make([]plan9.Qid, 0, len(names))
 	for _, name := range names {
-		newf1, err := srv.fs.Walk(ctx, newf, name)
-		if err != nil {
+		if err := srv.fs.Walk(ctx, newf, name); err != nil {
+			srv.fs.Clunk(newf)
 			return qids, err
 		}
-		if newf1 != newf {
-			srv.fs.Clunk(newf)
-			newf = newf1
-		}
-		qids = append(qids, newf.Qid())
+
+		qids = append(qids, srv.fs.Qid(newf))
 	}
-	newFid.fid = newf
+	if newFid != nil {
+		newFid.attached = true
+	} else {
+		srv.fs.Clunk(&fid.fid)
+		srv.fs.Clone(&fid.fid, newf)
+	}
 	return qids, nil
 }
 
@@ -227,7 +235,7 @@ func (srv *server[F]) handleOpen(ctx context.Context, t *xtag[F], m *plan9.Fcall
 	if t.fid.open {
 		return fmt.Errorf("fid is already open")
 	}
-	if t.fid.fid.Qid().IsDir() && (m.Mode == plan9.OWRITE ||
+	if srv.isDir(t.fid) && (m.Mode == plan9.OWRITE ||
 		m.Mode == plan9.ORDWR ||
 		m.Mode == plan9.OEXEC) {
 		return errPerm
@@ -237,7 +245,7 @@ func (srv *server[F]) handleOpen(ctx context.Context, t *xtag[F], m *plan9.Fcall
 		// TODO we could potentially help out by invoking src.fs.Stat
 		// and checking permissions, but that does have the potential
 		// to be racy.
-		f, iounit, err := srv.fs.Open(ctx, t.fid.fid, m.Mode)
+		iounit, err := srv.fs.Open(ctx, &t.fid.fid, m.Mode)
 		if err != nil {
 			srv.replyError(t, err)
 			return
@@ -245,16 +253,12 @@ func (srv *server[F]) handleOpen(ctx context.Context, t *xtag[F], m *plan9.Fcall
 		if iounit == 0 {
 			iounit = 8 * 1024
 		}
-		if t.fid.fid != f {
-			srv.fs.Clunk(t.fid.fid)
-		}
-		t.fid.fid = f
 		t.fid.open = true
 		t.fid.openMode = m.Mode
 		t.fid.iounit = iounit
 		srv.reply(t, &plan9.Fcall{
 			Type:   plan9.Ropen,
-			Qid:    f.Qid(),
+			Qid:    srv.fs.Qid(&t.fid.fid),
 			Iounit: iounit,
 		})
 	}()
@@ -273,7 +277,7 @@ func (srv *server[F]) handleRead(ctx context.Context, t *xtag[F], m *plan9.Fcall
 		return fmt.Errorf("offset too big")
 	}
 	go func() {
-		if t.fid.fid.Qid().IsDir() {
+		if srv.isDir(t.fid) {
 			err := srv.readDir(ctx, t, offset, m.Count)
 			if err != nil {
 				srv.replyError(t, err)
@@ -281,7 +285,7 @@ func (srv *server[F]) handleRead(ctx context.Context, t *xtag[F], m *plan9.Fcall
 			return
 		}
 		buf := make([]byte, min(t.fid.iounit, m.Count))
-		n, err := srv.fs.ReadAt(ctx, t.fid.fid, buf, offset)
+		n, err := srv.fs.ReadAt(ctx, &t.fid.fid, buf, offset)
 		if err != nil && err != io.EOF && n == 0 {
 			srv.replyError(t, err)
 			return
@@ -305,7 +309,7 @@ func (srv *server[F]) handleWrite(ctx context.Context, t *xtag[F], m *plan9.Fcal
 		return fmt.Errorf("cannot write; omode %v", t.fid.openMode)
 		return errPerm
 	}
-	if t.fid.fid.Qid().IsDir() {
+	if srv.isDir(t.fid) {
 		return fmt.Errorf("cannot write to a directory")
 	}
 	offset := int64(m.Offset)
@@ -313,7 +317,7 @@ func (srv *server[F]) handleWrite(ctx context.Context, t *xtag[F], m *plan9.Fcal
 		return fmt.Errorf("offset too big")
 	}
 	go func() {
-		n, err := srv.fs.WriteAt(ctx, t.fid.fid, m.Data, offset)
+		n, err := srv.fs.WriteAt(ctx, &t.fid.fid, m.Data, offset)
 		if err != nil {
 			// TODO We're ignoring the fact that WriteAt might have written
 			// some bytes here.
@@ -352,7 +356,7 @@ func (srv *server[F]) readDir(ctx context.Context, t *xtag[F], offset int64, cou
 			if len(f.dirEntryBuf) == 0 {
 				f.dirEntryBuf = make([]plan9.Dir, 16)
 			}
-			n, err := srv.fs.Readdir(ctx, f.fid, f.dirEntryBuf, f.dirIndex)
+			n, err := srv.fs.Readdir(ctx, &f.fid, f.dirEntryBuf, f.dirIndex)
 			if err != nil {
 				return err
 			}
@@ -452,8 +456,8 @@ func (srv *server[F]) newFid(id uint32) (*fid[F], error) {
 }
 
 func (srv *server[F]) releaseFid(f *fid[F]) {
-	if atomic.AddInt32(&f.refCount, -1) == 0 && !isZero(f.fid) {
-		srv.fs.Clunk(f.fid)
+	if atomic.AddInt32(&f.refCount, -1) == 0 && f.attached {
+		srv.fs.Clunk(&f.fid)
 	}
 }
 
@@ -610,6 +614,10 @@ func (srv *server[F]) releaseTag(t *xtag[F], success bool) {
 	// The request was asking to create a new fid, but failed,
 	// so remove it from the table.
 	srv.delFid(t.newFid)
+}
+
+func (srv *server[F]) isDir(f *fid[F]) bool {
+	return srv.fs.Qid(&f.fid).IsDir()
 }
 
 func canRead(mode uint8) bool {

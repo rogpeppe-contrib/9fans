@@ -46,7 +46,7 @@ func TestServerOpenRead(t *testing.T) {
 	c0, c1 := net.Pipe()
 	errc := make(chan error, 1)
 	go func() {
-		err := server.Serve(context.Background(), c0, server.Fsys[*staticfsys.Fid[struct{}, string]](fs0))
+		err := server.Serve(context.Background(), c0, server.Fsys[staticfsys.Fid[struct{}, string]](fs0))
 		t.Logf("Serve finished; error: %v", err)
 		c0.Close()
 		errc <- err
@@ -123,7 +123,7 @@ func TestWalkDeep(t *testing.T) {
 	c0, c1 := net.Pipe()
 	errc := make(chan error, 1)
 	go func() {
-		err := server.Serve(context.Background(), c0, server.Fsys[*staticfsys.Fid[struct{}, string]](fs0))
+		err := server.Serve(context.Background(), c0, server.Fsys[staticfsys.Fid[struct{}, string]](fs0))
 		t.Logf("Serve finished; error: %v", err)
 		c0.Close()
 		errc <- err

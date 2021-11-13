@@ -19,43 +19,43 @@ var (
 // It reports 64 for QidBits.
 type ErrorFsys[F Fid] struct{}
 
-func (ErrorFsys[F]) Auth(ctx context.Context, uname, aname string) (F, error) {
-	return *new(F), errNotImplemented
-}
-
-func (ErrorFsys[F]) Attach(ctx context.Context, auth *F, uname, aname string) (F, error) {
-	return *new(F), errNotImplemented
-}
-
-func (ErrorFsys[F]) Stat(ctx context.Context, f F) (plan9.Dir, error) {
-	return plan9.Dir{}, errNotImplemented
-}
-
-func (ErrorFsys[F]) Wstat(ctx context.Context, f F, dir plan9.Dir) error {
+func (ErrorFsys[F]) Auth(ctx context.Context, dst *F, uname, aname string) error {
 	return errNotImplemented
 }
 
-func (ErrorFsys[F]) Walk(ctx context.Context, f F, name string) (F, error) {
-	return *new(F), errNotImplemented
+func (ErrorFsys[F]) Attach(ctx context.Context, dst *F, auth *F, uname, aname string) error {
+	return errNotImplemented
 }
 
-func (ErrorFsys[F]) Open(ctx context.Context, f F, mode uint8) (F, uint32, error) {
-	return *new(F), 0, errNotImplemented
+func (ErrorFsys[F]) Stat(ctx context.Context, f *F) (plan9.Dir, error) {
+	return plan9.Dir{}, errNotImplemented
 }
 
-func (ErrorFsys[F]) Readdir(ctx context.Context, f F, dir []plan9.Dir, entryIndex int) (int, error) {
+func (ErrorFsys[F]) Wstat(ctx context.Context, f *F, dir plan9.Dir) error {
+	return errNotImplemented
+}
+
+func (ErrorFsys[F]) Walk(ctx context.Context, f *F, name string) error {
+	return errNotImplemented
+}
+
+func (ErrorFsys[F]) Open(ctx context.Context, f *F, mode uint8) (uint32, error) {
 	return 0, errNotImplemented
 }
 
-func (ErrorFsys[F]) ReadAt(ctx context.Context, f F, buf []byte, off int64) (int, error) {
+func (ErrorFsys[F]) Readdir(ctx context.Context, f *F, dir []plan9.Dir, entryIndex int) (int, error) {
 	return 0, errNotImplemented
 }
 
-func (ErrorFsys[F]) WriteAt(ctx context.Context, f F, buf []byte, off int64) (int, error) {
+func (ErrorFsys[F]) ReadAt(ctx context.Context, f *F, buf []byte, off int64) (int, error) {
 	return 0, errNotImplemented
 }
 
-func (ErrorFsys[F]) Remove(ctx context.Context, f F) error {
+func (ErrorFsys[F]) WriteAt(ctx context.Context, f *F, buf []byte, off int64) (int, error) {
+	return 0, errNotImplemented
+}
+
+func (ErrorFsys[F]) Remove(ctx context.Context, f *F) error {
 	return errNotImplemented
 }
 
@@ -63,21 +63,18 @@ func (ErrorFsys[F]) Close() error {
 	return nil
 }
 
-type qfid plan9.Qid
-
-func (f qfid) Qid() plan9.Qid {
-	return plan9.Qid(f)
-}
-
 type testErrorFsys struct {
-	ErrorFsys[qfid]
+	ErrorFsys[struct{}]
 }
 
-func (testErrorFsys) Clone(f qfid) qfid {
-	return f
+func (testErrorFsys) Clone(dst, f *struct{}) {
 }
 
-func (testErrorFsys) Clunk(f qfid) {
+func (testErrorFsys) Clunk(f *struct{}) {
 }
 
-var _ Fsys[qfid] = testErrorFsys{}
+func (testErrorFsys) Qid(f *struct{}) plan9.Qid {
+	panic("unreachable")
+}
+
+var _ Fsys[struct{}] = testErrorFsys{}

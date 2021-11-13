@@ -71,7 +71,7 @@ func TestCloneStatic(t *testing.T) {
 	go func() {
 		// TODO This type conversion won't be necessary if/when https://github.com/golang/go/issues/41176
 		// is fixed.
-		err := server.Serve[*clonefsys.Fid[*staticfsys.Fid[int, entryType], struct{}]](context.Background(), c0, cloneFS)
+		err := server.Serve[clonefsys.Fid[staticfsys.Fid[int, entryType], struct{}]](context.Background(), c0, cloneFS)
 		t.Logf("Serve finished; error: %v", err)
 		c0.Close()
 		errc <- err
@@ -127,7 +127,7 @@ func TestCloneNested(t *testing.T) {
 	go func() {
 		// TODO This type conversion won't be necessary if/when https://github.com/golang/go/issues/41176
 		// is fixed.
-		err := server.Serve[*clonefsys.Fid[*clonefsys.Fid[*staticfsys.Fid[fcontext, entryType], int], struct{}]](context.Background(), c0, cloneFS0)
+		err := server.Serve[clonefsys.Fid[clonefsys.Fid[staticfsys.Fid[fcontext, entryType], int], struct{}]](context.Background(), c0, cloneFS0)
 		t.Logf("Serve finished; error: %v", err)
 		c0.Close()
 		errc <- err

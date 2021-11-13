@@ -33,21 +33,6 @@ type Fid[F server.Fid, C0 any] struct {
 	fid  F
 }
 
-// Qid implements server.Fid.Qid.
-func (f *Fid[F, C0]) Qid() plan9.Qid {
-	if f.kind == cloneRoot {
-		return plan9.Qid{
-			Type: plan9.QTDIR,
-			Path: uint64(cloneRoot),
-		}
-	}
-	q := f.fid.Qid()
-	// TODO what to do when q.Path has significant high bits
-	// that are lost with the shift?
-	q.Path = (q.Path << qidBits) | uint64(f.kind)
-	return q
-}
-
 // Provider is used to determine how many clones to serve
 // for a given fid and what context to provide to the fids
 // in the inner fs.
@@ -65,7 +50,7 @@ type Provider[C any] interface {
 }
 
 type fsys[F server.Fid, C0, C1 any] struct {
-	server.ErrorFsys[*Fid[F, C0]]
+	server.ErrorFsys[Fid[F, C0]]
 	mu       sync.Mutex
 	fs       server.FsysInner[F, C1]
 	provider func(C0) Provider[C1]
@@ -81,38 +66,55 @@ type fsys[F server.Fid, C0, C1 any] struct {
 // When a fid is walked into one of the clones, the fs.AttachInner method is
 // used to create the fid to walk into; its context argument is taken from
 // a call to provider.Get.
-func New[C0, C1 any, F server.Fid](fs server.FsysInner[F, C1], provider func(C0) Provider[C1]) server.FsysInner[*Fid[F, C0], C0] {
+func New[C0, C1 any, F server.Fid](fs server.FsysInner[F, C1], provider func(C0) Provider[C1]) server.FsysInner[Fid[F, C0], C0] {
 	return &fsys[F, C0, C1]{
 		fs:       fs,
 		provider: provider,
 	}
 }
 
-func (fs *fsys[F, C0, C1]) Clone(f *Fid[F, C0]) *Fid[F, C0] {
-	f = ref(*f)
-	if f.kind != cloneRoot {
-		f.fid = fs.fs.Clone(f.fid)
+func (fs *fsys[F, C0, C1]) AttachInner(ctx context.Context, dst *Fid[F, C0], c C0) error {
+	*dst = Fid[F, C0]{
+		kind: cloneRoot,
+		c:    c,
 	}
-	return f
+	return nil
+}
+
+func (fs *fsys[F, C0, C1]) Clone(dst, src *Fid[F, C0]) {
+	*dst = *src
+	if dst.kind != cloneRoot {
+		fs.fs.Clone(&dst.fid, &src.fid)
+	}
 }
 
 func (fs *fsys[F, C0, C1]) Clunk(f *Fid[F, C0]) {
 	if f.kind != cloneRoot {
-		fs.fs.Clunk(f.fid)
+		fs.fs.Clunk(&f.fid)
 	}
 }
 
-func (fs *fsys[F, C0, C1]) AttachInner(ctx context.Context, c C0) (*Fid[F, C0], error) {
-	return &Fid[F, C0]{
-		kind: cloneRoot,
-		c:    c,
-	}, nil
+// Qid implements server.Fsys.Qid.
+func (fs *fsys[F, C0, C1]) Qid(f *Fid[F, C0]) plan9.Qid {
+	if f.kind == cloneRoot {
+		return plan9.Qid{
+			Type: plan9.QTDIR,
+			Path: uint64(cloneRoot),
+		}
+	}
+
+	q := fs.fs.Qid(&f.fid)
+	// TODO what to do when q.Path has significant high bits
+	// that are lost with the shift?
+	q.Path = (q.Path << qidBits) | uint64(f.kind)
+	return q
 }
 
-func (fs *fsys[F, C0, C1]) Attach(ctx context.Context, _ **Fid[F, C0], uname, aname string) (*Fid[F, C0], error) {
-	return &Fid[F, C0]{
+func (fs *fsys[F, C0, C1]) Attach(ctx context.Context, dst, afid *Fid[F, C0], uname, aname string) error {
+	*dst = Fid[F, C0]{
 		kind: cloneRoot,
-	}, nil
+	}
+	return nil
 }
 
 func (fs *fsys[F, C0, C1]) Stat(ctx context.Context, f *Fid[F, C0]) (plan9.Dir, error) {
@@ -123,19 +125,19 @@ func (fs *fsys[F, C0, C1]) Stat(ctx context.Context, f *Fid[F, C0]) (plan9.Dir, 
 			// TODO
 		}, nil
 	case cloneDir:
-		dir, err := fs.fs.Stat(ctx, f.fid)
+		dir, err := fs.fs.Stat(ctx, &f.fid)
 		if err != nil {
 			return dir, err
 		}
 		dir.Name = fmt.Sprint(f.id)
 		return dir, nil
 	case cloneRest:
-		return fs.fs.Stat(ctx, f.fid)
+		return fs.fs.Stat(ctx, &f.fid)
 	}
 	panic("unreachable")
 }
 
-func (fs *fsys[F, C0, C1]) Walk(ctx context.Context, f *Fid[F, C0], name string) (*Fid[F, C0], error) {
+func (fs *fsys[F, C0, C1]) Walk(ctx context.Context, f *Fid[F, C0], name string) error {
 	if name == ".." {
 		return fs.walkDotdot(ctx, f)
 	}
@@ -143,57 +145,39 @@ func (fs *fsys[F, C0, C1]) Walk(ctx context.Context, f *Fid[F, C0], name string)
 	case cloneRoot:
 		id, err := strconv.Atoi(name)
 		if err != nil || fmt.Sprint(id) != name {
-			return nil, errNotFound
+			return errNotFound
 		}
 		c1, ok := fs.provider(f.c).Get(id)
 		if !ok {
-			return nil, errNotFound
+			return errNotFound
 		}
-		fid, err := fs.fs.AttachInner(ctx, c1)
-		if err != nil {
-			return nil, err
+		if err := fs.fs.AttachInner(ctx, &f.fid, c1); err != nil {
+			return err
 		}
-		return &Fid[F, C0]{
-			kind: cloneDir,
-			// Keep the context around for walkDotdot.
-			c:   f.c,
-			id:  id,
-			fid: fid,
-		}, nil
+		f.kind = cloneDir
+		f.id = id
+		return nil
 	case cloneDir, cloneRest:
-		fid, err := fs.fs.Walk(ctx, f.fid, name)
-		if err != nil {
-			return nil, err
+		if err := fs.fs.Walk(ctx, &f.fid, name); err != nil {
+			return err
 		}
-		if fid != f.fid {
-			f = ref(*f)
-		}
-		f.fid = fid
 		f.kind = cloneRest
-		return f, nil
+		return nil
 	default:
 		panic("unreachable")
 	}
 }
 
-func (fs *fsys[F, C0, C1]) walkDotdot(ctx context.Context, f *Fid[F, C0]) (*Fid[F, C0], error) {
+func (fs *fsys[F, C0, C1]) walkDotdot(ctx context.Context, f *Fid[F, C0]) error {
 	panic("TODO")
 }
 
-func (fs *fsys[F, C0, C1]) Open(ctx context.Context, f *Fid[F, C0], mode uint8) (*Fid[F, C0], uint32, error) {
+func (fs *fsys[F, C0, C1]) Open(ctx context.Context, f *Fid[F, C0], mode uint8) (uint32, error) {
 	switch f.kind {
 	case cloneRoot:
-		return f, 8192, nil
+		return 8192, nil
 	case cloneDir, cloneRest:
-		fid, iounit, err := fs.fs.Open(ctx, f.fid, mode)
-		if err != nil {
-			return nil, 0, err
-		}
-		if fid != f.fid {
-			f = ref(*f)
-		}
-		f.fid = fid
-		return f, iounit, nil
+		return fs.fs.Open(ctx, &f.fid, mode)
 	}
 	panic("unreachable")
 }
@@ -216,13 +200,13 @@ func (fs *fsys[F, C0, C1]) Readdir(ctx context.Context, f *Fid[F, C0], dir []pla
 		}
 		return i, nil
 	case cloneDir, cloneRest:
-		return fs.fs.Readdir(ctx, f.fid, dir, index)
+		return fs.fs.Readdir(ctx, &f.fid, dir, index)
 	}
 	panic("unreachable")
 }
 
 func (fs *fsys[F, C0, C1]) ReadAt(ctx context.Context, f *Fid[F, C0], buf []byte, off int64) (int, error) {
-	return fs.fs.ReadAt(ctx, f.fid, buf, off)
+	return fs.fs.ReadAt(ctx, &f.fid, buf, off)
 }
 
 func (fs *fsys[F, C0, C1]) entry(id int) plan9.Dir {
