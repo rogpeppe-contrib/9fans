@@ -79,7 +79,9 @@ func xfidflush(x *Xfid) {
 	xfidlogflush(x)
 
 	// search windows for matching tag
+	bigUnlock()
 	wind.TheRow.Lk.Lock()
+	bigLock("xfidflush")
 	for j := 0; j < len(wind.TheRow.Col); j++ {
 		c := wind.TheRow.Col[j]
 		for i := 0; i < len(c.W); i++ {
@@ -844,7 +846,9 @@ func xfideventwrite(x *Xfid, w *wind.Window) {
 			goto Rescue
 		}
 
+		bigUnlock()
 		wind.TheRow.Lk.Lock() // just like mousethread
+		bigLock("xfideventwrite")
 		switch c {
 		case 'x',
 			'X':

@@ -151,6 +151,8 @@ func main() {
 	editpkg.Run = func(w *wind.Window, s string, rdir []rune) {
 		exec.Run(w, s, rdir, true, nil, nil, true)
 	}
+	ui.BigLock = bigLock
+	ui.BigUnlock = bigUnlock
 	exec.Fsysmount = fsysmount
 	exec.Fsysdelid = fsysdelid
 	exec.Xfidlog = xfidlog
@@ -415,7 +417,9 @@ func mousethread() {
 	defer bigUnlock()
 
 	for {
+		bigUnlock()
 		wind.TheRow.Lk.Lock()
+		bigLock("mousethread2")
 		flushwarnings()
 		wind.TheRow.Lk.Unlock()
 
@@ -424,7 +428,7 @@ func mousethread() {
 		bigUnlock()
 		select {
 		case <-ui.Mousectl.Resize:
-			bigLock("mousethread2")
+			bigLock("mousethread3")
 			if err := adraw.Display.Attach(draw.RefNone); err != nil {
 				util.Fatal("attach to window: " + err.Error())
 			}
@@ -435,7 +439,7 @@ func mousethread() {
 			ui.Clearmouse()
 
 		case pm := <-cplumb:
-			bigLock("mousethread3")
+			bigLock("mousethread4")
 			if pm.Type == "text" {
 				act := pm.LookupAttr("action")
 				if act == "" || act == "showfile" {
@@ -446,7 +450,7 @@ func mousethread() {
 			}
 
 		case <-cwarn:
-			bigLock("mousethread4")
+			bigLock("mousethread5")
 			// ok
 
 		/*
@@ -455,9 +459,9 @@ func mousethread() {
 		 * another race; see /sys/src/libdraw/mouse.c.
 		 */
 		case m := <-ui.Mousectl.C:
-			bigLock("mousethread5")
-			ui.Mousectl.Mouse = m
 			wind.TheRow.Lk.Lock()
+			bigLock("mousethread6")
+			ui.Mousectl.Mouse = m
 			t := wind.Rowwhich(&wind.TheRow, m.Point)
 
 			if (t != wind.Mousetext && t != nil && t.W != nil) && (wind.Mousetext == nil || wind.Mousetext.W == nil || t.W.ID != wind.Mousetext.W.ID) {
@@ -603,8 +607,8 @@ func waitthread() {
 		bigUnlock()
 		select {
 		case errb := <-cerr:
-			bigLock("waitthread2")
 			wind.TheRow.Lk.Lock()
+			bigLock("waitthread2")
 			alog.Printf("%s", errb)
 			adraw.Display.Flush()
 			wind.TheRow.Lk.Unlock()
@@ -628,6 +632,7 @@ func waitthread() {
 			}
 
 		case w := <-exec.Cwait:
+			wind.TheRow.Lk.Lock()
 			bigLock("waitthread4")
 			proc := w.Proc
 			var lc *exec.Command
@@ -642,7 +647,6 @@ func waitthread() {
 				}
 				lc = c
 			}
-			wind.TheRow.Lk.Lock()
 			t := &wind.TheRow.Tag
 			wind.Textcommit(t, true)
 			if c == nil {
@@ -684,7 +688,9 @@ func waitthread() {
 			}
 			c.Next = command
 			command = c
+			bigUnlock()
 			wind.TheRow.Lk.Lock()
+			bigLock("waitthread6")
 			t := &wind.TheRow.Tag
 			wind.Textcommit(t, true)
 			wind.Textinsert(t, 0, c.Name, true)
@@ -762,6 +768,13 @@ func ismtpt(file string) bool {
 	return strings.HasPrefix(file, mtpt) && (len(file) == len(mtpt) || file[len(mtpt)] == '/')
 }
 
+// big is big lock, meant to model the cooperative scheduling in Alef.
+// No blocking operations should happen while holding the big lock:
+// no channel operations and no other mutex locking.
+// If channels must be used or other mutexes must be acquired,
+// code must drop the big lock, do the blocking thing, and reacquire the big lock.
+// The big lock is always acquired last compared to any other mutexes.
+// Eventually the goal is to avoid needing it at all, but that will take some time.
 var big sync.Mutex
 var stk = make([]byte, 1<<20)
 
