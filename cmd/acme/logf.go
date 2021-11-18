@@ -47,7 +47,7 @@ func init() {
 func xfidlogopen(x *Xfid) {
 	bigUnlock()
 	eventlog.lk.Lock()
-	bigLock()
+	bigLock("xfidlogopen")
 	eventlog.f = append(eventlog.f, x.f)
 	x.f.logoff = eventlog.start + int64(len(eventlog.ev))
 	eventlog.lk.Unlock()
@@ -56,7 +56,7 @@ func xfidlogopen(x *Xfid) {
 func xfidlogclose(x *Xfid) {
 	bigUnlock()
 	eventlog.lk.Lock()
-	bigLock()
+	bigLock("xfidlogclose")
 	for i := 0; i < len(eventlog.f); i++ {
 		if eventlog.f[i] == x.f {
 			eventlog.f[i] = eventlog.f[len(eventlog.f)-1]
@@ -70,14 +70,14 @@ func xfidlogclose(x *Xfid) {
 func xfidlogread(x *Xfid) {
 	bigUnlock()
 	eventlog.lk.Lock()
-	bigLock()
+	bigLock("xfidlogread1")
 	eventlog.read = append(eventlog.read, x)
 
 	x.flushed = false
 	for x.f.logoff >= eventlog.start+int64(len(eventlog.ev)) && !x.flushed {
 		bigUnlock()
 		eventlog.r.Wait()
-		bigLock()
+		bigLock("xfidlogread2")
 	}
 	var i int
 
@@ -108,7 +108,7 @@ func xfidlogread(x *Xfid) {
 func xfidlogflush(x *Xfid) {
 	bigUnlock()
 	eventlog.lk.Lock()
-	bigLock()
+	bigLock("xfidlogflush")
 	for i := 0; i < len(eventlog.read); i++ {
 		rx := eventlog.read[i]
 		if rx.fcall.Tag == x.fcall.Oldtag {
@@ -143,7 +143,7 @@ func xfidlogflush(x *Xfid) {
 func xfidlog(w *wind.Window, op string) {
 	bigUnlock()
 	eventlog.lk.Lock()
-	bigLock()
+	bigLock("xfidlog")
 	if len(eventlog.ev) >= cap(eventlog.ev) {
 		// Remove and free any entries that all readers have read.
 		min := eventlog.start + int64(len(eventlog.ev))

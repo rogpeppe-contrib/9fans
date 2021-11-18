@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,7 +41,7 @@ func derror(d *draw.Display, errorstr string) {
 }
 
 func main() {
-	bigLock()
+	bigLock("main")
 	log.SetFlags(0)
 	log.SetPrefix("acme: ")
 
@@ -114,7 +115,7 @@ func main() {
 	}
 	go func() {
 		for err := range ch {
-			bigLock()
+			bigLock("error reader")
 			derror(d, err.Error())
 			bigUnlock()
 		}
@@ -220,7 +221,7 @@ func main() {
 	// threadnotify(shutdown, 1)
 	bigUnlock()
 	<-exec.Cexit
-	bigLock()
+	bigLock("exiting")
 	killprocs()
 	os.Exit(0)
 }
@@ -353,7 +354,7 @@ plumbproc(void *v)
 */
 
 func keyboardthread() {
-	bigLock()
+	bigLock("keyboardthread1")
 	defer bigUnlock()
 
 	var timerc <-chan time.Time
@@ -365,7 +366,7 @@ func keyboardthread() {
 		bigUnlock()
 		select {
 		case <-timerc:
-			bigLock()
+			bigLock("keyboardthread2")
 			timer = nil
 			timerc = nil
 			t = wind.Typetext
@@ -377,7 +378,7 @@ func keyboardthread() {
 			}
 
 		case r = <-keyboardctl.C:
-			bigLock()
+			bigLock("keyboardthread3")
 		Loop:
 			wind.Typetext = ui.Rowtype(&wind.TheRow, r, ui.Mouse.Point)
 			t = wind.Typetext
@@ -410,7 +411,7 @@ func keyboardthread() {
 }
 
 func mousethread() {
-	bigLock()
+	bigLock("mousethread1")
 	defer bigUnlock()
 
 	for {
@@ -423,7 +424,7 @@ func mousethread() {
 		bigUnlock()
 		select {
 		case <-ui.Mousectl.Resize:
-			bigLock()
+			bigLock("mousethread2")
 			if err := adraw.Display.Attach(draw.RefNone); err != nil {
 				util.Fatal("attach to window: " + err.Error())
 			}
@@ -434,7 +435,7 @@ func mousethread() {
 			ui.Clearmouse()
 
 		case pm := <-cplumb:
-			bigLock()
+			bigLock("mousethread3")
 			if pm.Type == "text" {
 				act := pm.LookupAttr("action")
 				if act == "" || act == "showfile" {
@@ -445,7 +446,7 @@ func mousethread() {
 			}
 
 		case <-cwarn:
-			bigLock()
+			bigLock("mousethread4")
 			// ok
 
 		/*
@@ -454,7 +455,7 @@ func mousethread() {
 		 * another race; see /sys/src/libdraw/mouse.c.
 		 */
 		case m := <-ui.Mousectl.C:
-			bigLock()
+			bigLock("mousethread5")
 			ui.Mousectl.Mouse = m
 			wind.TheRow.Lk.Lock()
 			t := wind.Rowwhich(&wind.TheRow, m.Point)
@@ -594,7 +595,7 @@ type Proc struct {
 func waitthread() {
 	var pids *Proc
 
-	bigLock()
+	bigLock("waitthread1")
 	defer bigUnlock()
 
 	for {
@@ -602,14 +603,14 @@ func waitthread() {
 		bigUnlock()
 		select {
 		case errb := <-cerr:
-			bigLock()
+			bigLock("waitthread2")
 			wind.TheRow.Lk.Lock()
 			alog.Printf("%s", errb)
 			adraw.Display.Flush()
 			wind.TheRow.Lk.Unlock()
 
 		case cmd := <-exec.Ckill:
-			bigLock()
+			bigLock("waitthread3")
 			found := false
 			for c = command; c != nil; c = c.Next {
 				// -1 for blank
@@ -627,7 +628,7 @@ func waitthread() {
 			}
 
 		case w := <-exec.Cwait:
-			bigLock()
+			bigLock("waitthread4")
 			proc := w.Proc
 			var lc *exec.Command
 			for c = command; c != nil; c = c.Next {
@@ -664,7 +665,7 @@ func waitthread() {
 			goto Freecmd
 
 		case c = <-exec.Ccommand:
-			bigLock()
+			bigLock("waitthread5")
 			// has this command already exited?
 			var lastp *Proc
 			for p := pids; p != nil; p = p.next {
@@ -733,7 +734,7 @@ func newwindowthread() {
 		// only fsysproc is talking to us, so synchronization is trivial
 		// TODO(rsc): split cnewwindow into two channels
 		<-cnewwindow
-		bigLock()
+		bigLock("newwindowthread")
 		w := ui.Makenewwindow(nil)
 		wind.Winsettag(w)
 		ui.Winmousebut(w)
@@ -764,14 +765,45 @@ func ismtpt(file string) bool {
 var big sync.Mutex
 var stk = make([]byte, 1<<20)
 
-func bigLock() {
+var heldLock lockInfo
+var lockID int
+
+type lockInfo struct {
+	id    int
+	goid  int64
+	about string
+}
+
+func init() {
+	go func() {
+		for {
+			time.Sleep(10 * time.Second)
+			locked := make(chan struct{})
+			go func() {
+				big.Lock()
+				big.Unlock()
+				locked <- struct{}{}
+			}()
+			select {
+			case <-locked:
+			case <-time.After(20 * time.Second):
+				log.Printf("probable deadlock on bigLock; currently held by goroutine %d; %s", heldLock.goid, heldLock.about)
+			}
+		}
+	}()
+}
+
+func bigLock(about string) {
 	big.Lock()
-	//n := runtime.Stack(stk, true)
-	//print("\n\nbig.Lock:\n", string(stk[:n]))
+	lockID++
+	heldLock = lockInfo{
+		id:    lockID,
+		goid:  runtime.GoroutineID(),
+		about: about,
+	}
 }
 
 func bigUnlock() {
-	//n := runtime.Stack(stk, true)
-	//print("\n\nbig.Unlock:\n", string(stk[:n]))
+	heldLock = lockInfo{}
 	big.Unlock()
 }

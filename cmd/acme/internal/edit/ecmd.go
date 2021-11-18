@@ -31,7 +31,7 @@ import (
 	"9fans.net/go/cmd/acme/internal/wind"
 )
 
-var BigLock = func() {}
+var BigLock = func(string) {}
 var BigUnlock = func() {}
 
 var Glooping int
@@ -555,7 +555,7 @@ func runpipe(t *wind.Text, cmd rune, cr []rune, state int) {
 	BigUnlock()
 	<-Cedit
 
-	BigLock()
+	BigLock("runpipe1")
 	var q *util.QLock
 	/*
 	 * The editoutlk exists only so that we can tell when
@@ -576,7 +576,7 @@ func runpipe(t *wind.Text, cmd rune, cr []rune, state int) {
 	BigUnlock()
 	q.Lock() // wait for file to close
 	q.Unlock()
-	BigLock()
+	BigLock("runpipe2")
 	wind.TheRow.Lk.Lock()
 	Editing = Inactive
 	if t != nil && t.W != nil {

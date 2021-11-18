@@ -67,7 +67,7 @@ func clampaddr(w *wind.Window) {
 func xfidctl(x *Xfid) {
 	for {
 		f := <-x.c
-		bigLock()
+		bigLock("xfidctl")
 		f(x)
 		adraw.Display.Flush()
 		bigUnlock()
@@ -1005,7 +1005,7 @@ func xfideventread(x *Xfid, w *wind.Window) {
 		wind.Winunlock(w)
 		bigUnlock()
 		ok := <-w.Eventwait
-		bigLock()
+		bigLock("xfideventread")
 		wind.Winlock(w, 'F')
 		if !ok {
 			return
