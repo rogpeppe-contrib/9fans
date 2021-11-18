@@ -1,10 +1,10 @@
 package wind
 
 import (
+	"9fans.net/go/cmd/acme/internal/sync"
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"unsafe"
 
 	"9fans.net/go/cmd/acme/internal/adraw"

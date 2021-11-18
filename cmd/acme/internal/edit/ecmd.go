@@ -31,7 +31,7 @@ import (
 	"9fans.net/go/cmd/acme/internal/wind"
 )
 
-var BigLock = func(string) {}
+var BigLock = func() {}
 var BigUnlock = func() {}
 
 var Glooping int
@@ -574,7 +574,7 @@ func runpipe(t *wind.Text, cmd rune, cr []rune, state int) {
 	q.Lock() // wait for file to close
 	q.Unlock()
 	wind.TheRow.Lk.Lock()
-	BigLock("runpipe2")
+	BigLock()
 	Editing = Inactive
 	if t != nil && t.W != nil {
 		wind.Winlock(t.W, 'M')

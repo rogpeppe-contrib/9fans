@@ -1,7 +1,7 @@
 package adraw
 
 import (
-	"sync"
+	"9fans.net/go/cmd/acme/internal/sync"
 
 	"9fans.net/go/cmd/acme/internal/alog"
 	"9fans.net/go/cmd/acme/internal/util"

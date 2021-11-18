@@ -17,8 +17,8 @@
 package main
 
 import (
+	"9fans.net/go/cmd/acme/internal/sync"
 	"fmt"
-	"sync"
 
 	"9fans.net/go/cmd/acme/internal/wind"
 	"9fans.net/go/plan9"
@@ -47,7 +47,7 @@ func init() {
 func xfidlogopen(x *Xfid) {
 	bigUnlock()
 	eventlog.lk.Lock()
-	bigLock("xfidlogopen")
+	bigLock()
 	eventlog.f = append(eventlog.f, x.f)
 	x.f.logoff = eventlog.start + int64(len(eventlog.ev))
 	eventlog.lk.Unlock()
@@ -56,7 +56,7 @@ func xfidlogopen(x *Xfid) {
 func xfidlogclose(x *Xfid) {
 	bigUnlock()
 	eventlog.lk.Lock()
-	bigLock("xfidlogclose")
+	bigLock()
 	for i := 0; i < len(eventlog.f); i++ {
 		if eventlog.f[i] == x.f {
 			eventlog.f[i] = eventlog.f[len(eventlog.f)-1]
@@ -70,14 +70,14 @@ func xfidlogclose(x *Xfid) {
 func xfidlogread(x *Xfid) {
 	bigUnlock()
 	eventlog.lk.Lock()
-	bigLock("xfidlogread1")
+	bigLock()
 	eventlog.read = append(eventlog.read, x)
 
 	x.flushed = false
 	for x.f.logoff >= eventlog.start+int64(len(eventlog.ev)) && !x.flushed {
 		bigUnlock()
 		eventlog.r.Wait()
-		bigLock("xfidlogread2")
+		bigLock()
 	}
 	var i int
 
@@ -108,7 +108,7 @@ func xfidlogread(x *Xfid) {
 func xfidlogflush(x *Xfid) {
 	bigUnlock()
 	eventlog.lk.Lock()
-	bigLock("xfidlogflush")
+	bigLock()
 	for i := 0; i < len(eventlog.read); i++ {
 		rx := eventlog.read[i]
 		if rx.fcall.Tag == x.fcall.Oldtag {
@@ -143,7 +143,7 @@ func xfidlogflush(x *Xfid) {
 func xfidlog(w *wind.Window, op string) {
 	bigUnlock()
 	eventlog.lk.Lock()
-	bigLock("xfidlog")
+	bigLock()
 	if len(eventlog.ev) >= cap(eventlog.ev) {
 		// Remove and free any entries that all readers have read.
 		min := eventlog.start + int64(len(eventlog.ev))

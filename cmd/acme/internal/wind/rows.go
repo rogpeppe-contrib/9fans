@@ -1,7 +1,7 @@
 package wind
 
 import (
-	"sync"
+	"9fans.net/go/cmd/acme/internal/sync"
 
 	"9fans.net/go/cmd/acme/internal/adraw"
 	"9fans.net/go/cmd/acme/internal/util"

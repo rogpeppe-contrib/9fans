@@ -477,13 +477,13 @@ func Textselect(t *wind.Text) {
 		for Mouse.Buttons == b {
 			*Mouse = <-Mousectl.C
 		}
-		BigLock("Textselect")
+		BigLock()
 		clicktext = nil
 	}
 }
 
-var BigLock = func(string){}
-var BigUnlock = func(){}
+var BigLock = func() {}
+var BigUnlock = func() {}
 
 /*
  * Release the button in less than DELAY ms and it's considered a null selection

@@ -15,12 +15,12 @@
 package main
 
 import (
+	"9fans.net/go/cmd/acme/internal/sync"
 	"fmt"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"9fans.net/go/cmd/acme/internal/ui"

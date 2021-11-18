@@ -54,7 +54,7 @@ func plumbthread() {
 			}
 			time.Sleep(2 * time.Second)
 		}
-		bigLock("plumb open") // TODO still racy
+		bigLock() // TODO still racy
 		plumbeditfid = fid
 		ui.Plumbsendfid, _ = plumb.Open("send", plan9.OWRITE|plan9.OCEXEC)
 		bigUnlock()
@@ -75,13 +75,13 @@ func plumbthread() {
 		/*
 		 * Lost connection.
 		 */
-		bigLock("plumb send fid") // TODO still racy
+		bigLock() // TODO still racy
 		fid = ui.Plumbsendfid
 		ui.Plumbsendfid = nil
 		big.Unlock()
 		fid.Close()
 
-		bigLock("plumb edit fid") // TODO still racy
+		bigLock() // TODO still racy
 		fid = plumbeditfid
 		plumbeditfid = nil
 		big.Unlock()

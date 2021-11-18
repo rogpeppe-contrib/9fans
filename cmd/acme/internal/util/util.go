@@ -16,8 +16,9 @@ package util
 
 import (
 	"log"
-	"sync"
 	"sync/atomic"
+
+	"9fans.net/go/cmd/acme/internal/sync"
 )
 
 func Min(a int, b int) int {

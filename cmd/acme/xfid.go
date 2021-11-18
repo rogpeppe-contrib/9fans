@@ -67,7 +67,7 @@ func clampaddr(w *wind.Window) {
 func xfidctl(x *Xfid) {
 	for {
 		f := <-x.c
-		bigLock("xfidctl")
+		bigLock()
 		f(x)
 		adraw.Display.Flush()
 		bigUnlock()
@@ -81,7 +81,7 @@ func xfidflush(x *Xfid) {
 	// search windows for matching tag
 	bigUnlock()
 	wind.TheRow.Lk.Lock()
-	bigLock("xfidflush")
+	bigLock()
 	for j := 0; j < len(wind.TheRow.Col); j++ {
 		c := wind.TheRow.Col[j]
 		for i := 0; i < len(c.W); i++ {
@@ -848,7 +848,7 @@ func xfideventwrite(x *Xfid, w *wind.Window) {
 
 		bigUnlock()
 		wind.TheRow.Lk.Lock() // just like mousethread
-		bigLock("xfideventwrite")
+		bigLock()
 		switch c {
 		case 'x',
 			'X':
@@ -1009,7 +1009,7 @@ func xfideventread(x *Xfid, w *wind.Window) {
 		wind.Winunlock(w)
 		bigUnlock()
 		ok := <-w.Eventwait
-		bigLock("xfideventread")
+		bigLock()
 		wind.Winlock(w, 'F')
 		if !ok {
 			return
